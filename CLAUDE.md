@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Start here (read on session start)
+
+Before working, read **`docs/GAME_DESIGN.md`** — it's the quick-start context builder
+for the whole game vision: character classes, class-driven stat blocks, the
+time-degradation map shift (the core gimmick), the shift telegraph/preview, and the
+deferred time-mage powers. It also lists the structural choices to respect *now*
+(maps as a *sequence* of height states, a small shift API, data-driven stats). Then
+skim `docs/TODO.md` (live task list) and `docs/DECISION_LOG.md` (locked-in decisions).
+
 ## Project
 
 Cylinder Tactics — a Final Fantasy Tactics-style game: 2D-feeling, isometric,

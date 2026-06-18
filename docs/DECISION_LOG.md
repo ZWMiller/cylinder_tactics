@@ -6,6 +6,27 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-18 — Core gimmick documented; map = sequence of height states
+
+**Decision:** Recorded the full game-design vision in `docs/GAME_DESIGN.md`
+(character classes for player+enemy, class-driven stat blocks, the time-degradation
+map shift, shift telegraph + hold-to-preview, and the deferred time-mage powers). The
+one structural commitment taken *now*, ahead of building `Battlefield.gd`: a map is
+modeled as a **sequence/generator of per-tile height states over time**, not a single
+static height array, and the shift gets a small **public API** (peek next state,
+apply next shift, apply one tile early).
+
+**Why:** The gimmick's preview feature needs the *next* map state to exist before it
+is applied, and the time-mage's powers need to poke the shift externally. Both are
+deferred, but baking a single static height array into the terrain generator now would
+force a painful retrofit. Designing the data shape correctly is cheap today.
+
+**Rejected:** Treating the battlefield as one fixed height array with the shift as a
+private side effect of the turn loop — simpler short-term, but blocks preview and the
+time-mage cleanly.
+
+---
+
 ## 2026-06-17 — Documentation & workflow conventions
 
 **Decision:** Heavy documentation discipline. Every function gets a docstring
