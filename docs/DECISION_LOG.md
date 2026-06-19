@@ -6,6 +6,36 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-18 — Unit = hybrid scene+script; class is a data table
+
+**Decision:** The character "model" is a **hybrid**: `scenes/Unit.tscn` authors the
+node layout (a cylinder Body + a Hat `MeshInstance3D`), and `scripts/Unit.gd`
+(`class_name Unit`) is the self-contained object that owns identity (allegiance,
+class), appearance, `grid_coord`, and later stats/combat. A unit is spawned by
+`Unit.tscn.instantiate()` and reskinned via `configure(side, class)`. Class data
+(hat color + hat *shape*) lives in `scripts/UnitClasses.gd`, mirroring
+`TileTypes.gd`; shapes are square (soldier) / pyramid (archer) / cone (mage).
+
+**Why:**
+- **Hybrid, not pure-code** (unlike `Battlefield`, which builds 1,728 procedural
+  tiles in code): a unit is a *uniform prefab* stamped out many times, which is
+  exactly what Godot scenes/`instantiate()` are for, and it lets the owner tweak the
+  model visually in the editor. "Code-driven" still holds — the *spawner* reads data
+  and instantiates; only the prefab's node tree is authored as a scene.
+- **Per-instance materials + fresh meshes per unit.** Godot materials/meshes are
+  shared *state* when shared, so each unit builds its own (`material_override`, a new
+  mesh per `new_hat_mesh`). This is what makes independent reskinning possible.
+- **Class as a data table**, not hardcoded in `Unit`: keeps the one "what does a
+  class look/play like" place (and the future home for stat templates) separate from
+  unit behavior. Hat shape is chosen in a single `match`, so diverging a class's
+  shape is a one-line change that `Unit` adapts to by measuring the mesh.
+
+**Rejected:** Pure-code unit (everything in `Unit.gd`, no scene) — consistent with
+`Battlefield` but loses editor-visual tweaking and the core scene-instancing idiom;
+and hardcoding hat appearance in `Unit` — blurs class data into unit behavior.
+
+---
+
 ## 2026-06-18 — Core gimmick documented; map = sequence of height states
 
 **Decision:** Recorded the full game-design vision in `docs/GAME_DESIGN.md`

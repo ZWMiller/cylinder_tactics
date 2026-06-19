@@ -12,12 +12,18 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
 - [x] Time-shift v1 — map is a *sequence* of states; Space cycles grassland→canyon→desert
       via the small shift API (`peek_next_state` / `advance_shift`). `scripts/maps/DemoMap.gd`
 - [x] `TileTypes.gd` — terrain enum + flat-color palette (shared vocabulary)
+- [x] `Unit` scene + script — cylinder body (color = allegiance) + per-class hat
+      (square/pyramid/cone = soldier/archer/mage). Hybrid scene+script; per-instance
+      materials so units reskin independently. `UnitClasses.gd` = class table.
+      Demo units spawn via `Main.gd`. See `docs/UNIT.md`
 
 ## Next
-- [ ] `Unit` scene + script — cylinder (+ cone hat for class) that knows its grid coordinate
 - [ ] Promote grid <-> world helpers out of `Battlefield` into a shared coordinate module
       (tile -> world done; still need click/ray -> tile)
-- [ ] Re-settle units + apply fall damage inside `advance_shift()` (currently terrain-only)
+- [ ] Re-settle units + apply fall damage inside `advance_shift()` (currently terrain-only;
+      units don't move when the map shifts yet)
+- [ ] `Unit.grid_coord` is stored but unused — wire it to placement/movement
+- [ ] Class-driven stat blocks — `UnitClasses.gd` is the intended home (GAME_DESIGN §2–3)
 
 ## Later / backlog
 - [ ] Tile selection + highlight on hover/click

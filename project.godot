@@ -17,8 +17,6 @@ config/icon="res://icon.svg"
 
 [display]
 
-; Running-game window size (the F5 "debug" window). Render at 1080p but launch
-; maximized so it fills the screen without running off-screen behind the title bar.
 window/size/viewport_width=1920
 window/size/viewport_height=1080
 window/size/mode=2

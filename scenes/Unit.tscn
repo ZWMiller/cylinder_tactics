@@ -1,0 +1,30 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/Unit.gd" id="1_unit"]
+
+; Body cylinder and a default square hat (matching the default SOLDIER class).
+; These are the *authored preview* — Unit.gd swaps the hat mesh per class and
+; recolors both at runtime, but having real meshes here means the unit looks right
+; in the editor too. Positions are recomputed in code from the mesh sizes
+; (Unit._layout); the transforms below just match that so the editor preview is
+; seated correctly. Identity bases (no rotation) only — see CLAUDE.md on avoiding
+; hand-written rotated Transform3D bases.
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_body"]
+top_radius = 0.3
+bottom_radius = 0.3
+height = 0.7
+
+[sub_resource type="BoxMesh" id="BoxMesh_hat"]
+size = Vector3(0.544, 0.45, 0.544)
+
+[node name="Unit" type="Node3D"]
+script = ExtResource("1_unit")
+
+[node name="Body" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.35, 0)
+mesh = SubResource("CylinderMesh_body")
+
+[node name="Hat" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.925, 0)
+mesh = SubResource("BoxMesh_hat")
