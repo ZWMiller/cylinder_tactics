@@ -16,14 +16,40 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       (square/pyramid/cone = soldier/archer/mage). Hybrid scene+script; per-instance
       materials so units reskin independently. `UnitClasses.gd` = class table.
       Demo units spawn via `Main.gd`. See `docs/UNIT.md`
+- [x] Click→tile picking — per-tile collision box (tagged with `grid_coord` meta) +
+      `Battlefield.tile_at_screen_point()` physics raycast (height-correct). Decided
+      *not* to extract a separate coordinate module; helpers stay on `Battlefield`
+      (the coordinate authority). See `docs/DECISION_LOG.md` 2026-06-19.
+- [x] Click-to-move units — single `_active_unit` pointer (the turn-order seam; Tab
+      cycles it as a stand-in), tile-occupancy map, active-unit highlight.
+      `Unit.grid_coord` now drives placement. See DECISION_LOG.
+- [x] Stepped, tile-by-tile movement (no diagonals) — units walk the route bumping
+      up/down to each tile's height instead of floating in a straight line. Right-click
+      adds waypoints, mouse-move previews the lit-up path, left-click commits, Escape
+      clears. `Battlefield.expand_path` / `path_to_world_points` / `show_path`,
+      `Unit.move_along`. Per-step heights exposed for the future jump gate. See DECISION_LOG.
+- [x] Per-turn action menu — bottom-left HUD (`ActionMenu.gd`, a CanvasLayer view)
+      with Move / End Turn; Up/Down highlight, Enter activates. Input is gated by a
+      `Phase` enum in `Main` (MENU vs MOVE): movement only works after choosing Move;
+      End Turn cycles the active unit. See DECISION_LOG.
 
 ## Next
-- [ ] Promote grid <-> world helpers out of `Battlefield` into a shared coordinate module
-      (tile -> world done; still need click/ray -> tile)
+- [ ] **Jump-height gate** — the hook is ready: reject a move when any
+      `Battlefield.path_step_heights(path)` step exceeds the unit's jump stat (needs the
+      stat block below). Tint the preview red / refuse the commit when illegal.
+- [ ] Movement range limit — clicks currently move the active unit *anywhere*; gate by
+      grid distance + Z cost (Battlefield helpers are the place for reachability)
+- [ ] Class-driven stat blocks — `UnitClasses.gd` is the intended home (GAME_DESIGN §2–3);
+      feeds movement range (move/jump) and turn order (speed)
+- [ ] Turn order / turn-based loop — will *set* `_active_unit` from speed/initiative,
+      replacing the temporary Tab cycle
 - [ ] Re-settle units + apply fall damage inside `advance_shift()` (currently terrain-only;
-      units don't move when the map shifts yet)
-- [ ] `Unit.grid_coord` is stored but unused — wire it to placement/movement
-- [ ] Class-driven stat blocks — `UnitClasses.gd` is the intended home (GAME_DESIGN §2–3)
+      units don't move when the map shifts yet) — occupancy map now exists in `Main`
+
+## Polish / nice-to-have
+- [ ] Distinguish committed-waypoint tiles from the hover tail in the path preview
+      (e.g. a stronger color), and maybe a destination marker
+- [ ] Tune `Unit.MOVE_SPEED` and the step cadence once real maps exist
 
 ## Later / backlog
 - [ ] Tile selection + highlight on hover/click
@@ -38,6 +64,21 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
 
 See `docs/GAME_DESIGN.md` for the full game-design vision and the structural choices
 to respect now (maps as height *sequences*, a shift API, data-driven stats).
+
+## Owner onboarding / learning (revisit next session)
+- [x] **Line-by-line walkthrough of Godot's invocation pattern**, using "place one
+      unit" (player archer at tile 12,10) as the worked example. Mapped each step to
+      exact lines: `Main.gd:12` `preload` (parse-time blueprint) -> `:41`
+      `instantiate()` (the `new`, no `_ready` yet) -> `:44` `configure` stashes
+      identity (guarded by `is_node_ready()` in `Unit.gd:61`) -> `:46` `add_child` is
+      the seam that fires `Unit._ready` (`Unit.gd:49`) -> `_apply_appearance`/`_layout`
+      read the fields, swap the hat mesh via `UnitClasses.new_hat_mesh`, build
+      per-unit materials -> `:47` `tile_to_world` places it -> engine draws every
+      frame (no explicit render call). Key takeaway: `add_child` is the boundary
+      between "constructing data" and "engine owns the lifecycle."
+      - Analogies that landed: PackedScene ≈ class blueprint/prefab you clone;
+        `_ready` ≈ engine-invoked constructor-ish hook; `UnitClasses` statics ≈ a
+        module of free functions.
 
 ## Notes / things learned
 - A camera looks down its own -Z axis. A transposed rotation matrix = inverse

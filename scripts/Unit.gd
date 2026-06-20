@@ -33,9 +33,24 @@ enum Allegiance {
 @export var unit_class: UnitClasses.Class = UnitClasses.Class.SOLDIER
 
 ## The unit's tile address on the battlefield grid, deliberately *decoupled* from
-## its world position (docs/GAME_DESIGN.md §8). Movement/placement that uses this
-## is a later task; the field lives here now so it has one home.
+## its world position (docs/GAME_DESIGN.md §8). The mover (Main, later the turn
+## system) updates this; `move_to` only handles the *visual* glide.
 var grid_coord: Vector2i = Vector2i.ZERO
+
+# --- Movement (visual glide between tiles) -----------------------------------
+
+## Glide speed in world units per second. Constant speed (via `move_toward`) gives
+## a predictable arrival, unlike the ease-out of a `lerp`.
+const MOVE_SPEED := 6.0
+
+## The remaining points this unit is walking through, front first (in the parent's
+## local space). Built from `Battlefield.path_to_world_points`, so the unit steps
+## up/down tile by tile instead of gliding in a straight line. Empty when stopped.
+var _move_queue: Array[Vector3] = []
+
+## True while a walk is in progress. Gates `_process` so an idle unit costs nothing,
+## and lets callers (Main) avoid interrupting a move in progress.
+var _is_moving: bool = false
 
 # --- Cached child references (resolved once the node is in the tree) ----------
 # `@onready` runs the assignment just before `_ready`, so these are valid for the
@@ -48,6 +63,55 @@ var grid_coord: Vector2i = Vector2i.ZERO
 ## the current allegiance/class to the meshes and materials.
 func _ready() -> void:
 	_apply_appearance()
+	# Idle until something calls `move_to`; no need to run `_process` every frame.
+	set_process(false)
+
+
+## Walk this unit through `points` in order (parent-local positions), at a constant
+## speed, stopping at the last. Pass the polyline from
+## `Battlefield.path_to_world_points` so the unit steps up/down tile by tile. The
+## caller owns `grid_coord`/occupancy. An empty list is a no-op.
+func move_along(points: Array) -> void:
+	if points.is_empty():
+		return
+	_move_queue = points.duplicate()
+	_is_moving = true
+	set_process(true)
+
+
+## True while a walk is in progress, so the input handler can avoid starting a new
+## move (or changing the active unit) mid-step.
+func is_moving() -> bool:
+	return _is_moving
+
+
+## Godot lifecycle hook: runs every frame, but only while a walk is active (we
+## toggle it off when idle). Advances toward the next queued point at a constant
+## speed; on arrival, pops it and aims at the next. `move_toward` clamps exactly to
+## the target on the final step, so the equality check lands precisely.
+func _process(delta: float) -> void:
+	if _move_queue.is_empty():
+		_is_moving = false
+		set_process(false)
+		return
+	var target: Vector3 = _move_queue[0]
+	position = position.move_toward(target, MOVE_SPEED * delta)
+	if position.is_equal_approx(target):
+		position = target  # snap, so floating-point drift doesn't accumulate
+		_move_queue.pop_front()
+
+
+## Toggle the "this is the active unit" highlight — a soft glow on the body so the
+## player can see whose turn it is. Uses the body's own material (each unit has its
+## own, so this never lights up other units).
+func set_active(active: bool) -> void:
+	var mat := _body.material_override as StandardMaterial3D
+	if mat == null:
+		return
+	mat.emission_enabled = active
+	if active:
+		mat.emission = Color(1.0, 0.95, 0.4)  # warm yellow glow
+		mat.emission_energy_multiplier = 0.5
 
 
 ## Set this unit's side and class in one call, then refresh its look. The
