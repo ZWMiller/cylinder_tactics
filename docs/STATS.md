@@ -39,8 +39,8 @@ code.**
 If two units pointed at one `StatBlock` and one mutated it, both would change. So:
 - every `StatBlock` op (`combined`, `scaled`, `clamped_nonneg`) returns a **new** block,
 - shared templates (a `ClassDef.base`) are treated as **read-only**,
-- the only mutable per-unit stat state is `current_hp` / `current_mp`, which live on the
-  `Unit`, never on a shared template.
+- the only mutable per-unit stat state is `current_hp` / `current_mp` / `current_exp`,
+  which live on the `Unit`, never on a shared template.
 
 ## The schema (`StatBlock`)
 
@@ -48,6 +48,19 @@ If two units pointed at one `StatBlock` and one mutated it, both would change. S
 temporal_resist`. All small integers (the **small-numbers philosophy** — see GAME_DESIGN
 §3). `evasion` and `temporal_resist` are reserved: fields exist now, effects land with
 combat and the time shift respectively.
+
+## Live pools vs. the schema (where EXP lives)
+
+`StatBlock` is the *derived/max* schema — it's summed across base + growth + aptitude +
+banked, so a field only belongs there if summing it that way is meaningful. **Live,
+mutable per-unit progress does not** — it lives directly on `Unit`:
+
+- `current_hp` / `current_mp` — spent and restored in play; capped by `max_stats`.
+- `current_exp` — experience banked toward the next level. **Not** a `StatBlock` field:
+  "summing experience across a class profile and an aptitude" is nonsense. Paired with
+  `Unit.EXP_PER_LEVEL` (a flat placeholder threshold until a real leveling curve exists)
+  so it can show as `EXP current / next`. Tracked + displayed today; *spending* it on a
+  level-up wires in with the leveling system (`Unit.level_up`).
 
 ## Leveling = a job history you bank (FFT-style)
 

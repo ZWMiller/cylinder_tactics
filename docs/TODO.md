@@ -37,19 +37,23 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       and `assets/recruits/`. Effective = class base + banked level-up growth + aptitude;
       FFT-style per-level-up job banking (`Unit.level_history`); authored PCs vs rolled
       enemies. Reserved `evasion`/`temporal_resist` fields. See `docs/STATS.md`.
+- [x] Spawn leveled, classed characters — `Main` now spawns PCs from authored
+      `Recruit.tres` (`RECRUIT_BRON/DART/WISP`) and enemies via
+      `StatRoll.random_recruit(class, level, rng)` (level 3, fixed seed), both through one
+      `_spawn_recruit` → `Unit.init_from_recruit` path. Rolled foes get names sampled from
+      the new `scripts/UnitNames.gd` pool (25 male + 25 female) instead of "Foe 0123".
+- [x] Stat HUD + inspection — `ActionMenu` shows the active unit's name + a "Stats"
+      option; `StatPanel` floats a unit's stat block above its head on ~1s hover (any
+      ally/enemy; detection reuses tile occupancy, so units need no collision);
+      `StatusPanel` is a persistent bottom-right status box during the menu phase
+      (FFT layout). `Unit.stats_panel_text()` / `stats_summary()` format the readout.
+- [x] Active-unit highlight = FFT-style tile marker — a translucent blue(ally)/red(enemy)
+      pad on the active unit's tile via `Battlefield.set_active_tile`, tracked each frame
+      in `Main._process`. Replaced an earlier body-emission + bloom approach.
+- [x] EXP tracking — `Unit.current_exp` + `EXP_PER_LEVEL` placeholder, shown in the stat
+      block. Lives on `Unit` (mutable progress), deliberately NOT a `StatBlock` field.
 
 ## Next
-
-### Do first — make the new stat system visible/usable, then verify
-- [ ] **Wire `Main.gd` to spawn leveled, classed characters.** Demo units are still
-      spawned via `configure(side, class)` (appearance-only, baseline level-1 stats).
-      Spawn PCs from authored `Recruit.tres` via `Unit.init_from_recruit`, and enemies via
-      `StatRoll.random_recruit(class, level, rng)`, so units carry real classes, levels,
-      and stat blocks. Everything below depends on this.
-- [ ] **Action menu: show the active character's name**, and add a **"Stats" option** that
-      displays the unit's full stat block (for now even a print / simple panel is fine) so
-      the owner can verify class/level/aptitude/banked-growth in-game before moving on.
-      `Unit.stats_summary()` already returns a one-line summary to start from.
 
 ### Then
 - [ ] **Jump-height gate** — NOW UNBLOCKED (units have a real `jump` stat in `max_stats`).
@@ -58,11 +62,53 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
 - [ ] Movement range limit — clicks currently move the active unit *anywhere*; gate by
       grid distance + Z cost against `max_stats.move` (Battlefield helpers own reachability)
 - [ ] Turn order / turn-based loop — will *set* `_active_unit` from `max_stats.speed`,
-      replacing the temporary Tab cycle
+      replacing the temporary Tab cycle. **Do this as the first `TurnManager` extraction**
+      (see the Architecture section) rather than growing the logic inside `Main`.
 - [ ] Re-settle units + apply fall damage inside `advance_shift()` (terrain-only today) —
       fall damage should read `max_stats.temporal_resist` (the reserved hook), not a global
 - [ ] Promotion / job-upgrade tree — a separate resource (which class unlocks which, at
       what level); deliberately kept out of `ClassDef`. See `docs/STATS.md`.
+
+## Architecture — toward a reusable `Battle.tscn`
+
+`Main.gd` is currently the single coordinator (a "God node"): it holds encounter setup,
+turn/active-unit state, the MENU/MOVE input state machine, path planning, and the
+hover-inspect logic. That's fine and intended for the prototype — **don't refactor
+speculatively** (per `CLAUDE.md`: clarity over premature abstraction). The trigger to
+start splitting is the **Turn order** item above: it will bloat the active-unit logic, so
+let it *motivate* the first extraction instead of refactoring for its own sake.
+
+Goal: a single reusable **`Battle.tscn`** (Battlefield + camera + HUD + coordinator
+nodes) parameterized by **data** (map states + roster), so every level is the same scene
+with a different `Encounter` resource — no per-battle `Main` rewrite. The Godot idiom is
+**node composition + signals**, not imported modules: each subsystem becomes its own node
+that *announces* events (e.g. `signal active_unit_changed(unit)`) so listeners react
+without the announcer knowing them. Reusable pieces already exist (`Battlefield`, `Unit`,
+`ActionMenu`/`StatPanel`/`StatusPanel`, the stat resources); these extractions carve the
+rest out of `Main`, roughly in order:
+
+- [ ] **`TurnManager` (do first, with Turn order)** — owns `_active_unit`, `_player_units`,
+      and (new) the speed-based turn queue; replaces `_cycle_active_unit` + the Tab cycle.
+      Emits `active_unit_changed(unit)` / `turn_ended(unit)`. Listeners (HUD title, status
+      box, active-tile marker) react to the signal instead of `Main` hard-wiring them.
+- [ ] **`Encounter` resource** — the per-battle *data*: map `states` (or a map generator
+      ref) + the roster (PC recruits + enemy class/level rows) + RNG seed. This is what
+      makes `Battle.tscn` reusable: swap the resource, get a different fight.
+- [ ] **`EncounterSpawner` node** — consumes an `Encounter`: builds the battlefield states
+      and spawns units (today's `_spawn_recruit`, rosters, RNG). Owns the
+      `_units_by_tile` occupancy map (or hands it to a shared `BattleState`).
+- [ ] **`BattleInputController` node** — the MENU/MOVE `Phase` state machine, path planning
+      (`_planned_waypoints`, preview), and hover-inspect. Talks to `TurnManager` (whose
+      turn) and `Battlefield` (picking/overlays); emits `move_committed(unit, tiles)`.
+- [ ] **`HUD` node** — groups `ActionMenu` + `StatPanel` + `StatusPanel` under one parent
+      that subscribes to the signals above (active-unit → title/status; hover → StatPanel),
+      so the views are wired in one place instead of scattered through `Main`.
+- [ ] **`Battle.tscn` + thin `Battle.gd`** — composes the above and is handed an
+      `Encounter`. `Main` shrinks to a launcher (pick an encounter → load `Battle.tscn`),
+      or disappears in favor of a menu/level-select scene.
+
+Decision to log when the first extraction lands: the move to **node composition + signals**
+as the battle architecture (and what each node owns / which signals exist).
 
 ## Polish / nice-to-have
 - [ ] Distinguish committed-waypoint tiles from the hover tail in the path preview

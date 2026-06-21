@@ -6,6 +6,47 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-21 — Stat HUD, hover-inspect via tile occupancy, tile-marker highlight, EXP on Unit
+
+**Decision:** Made the stat system visible in-game and reworked the active-unit highlight.
+
+- **Hover-to-inspect (`StatPanel`):** resting the cursor on any unit ~1s floats its stat
+  block above its head. Units have **no collision of their own** — detection ray-picks the
+  *tile* (`Battlefield.tile_at_screen_point`) and looks up its occupant in `_units_by_tile`.
+  Hovering a unit = hovering its tile. The panel is a **screen-space** `CanvasLayer` box
+  (rounded `StyleBoxFlat` matching the menu), positioned by projecting the unit's head to
+  the screen (`Camera3D.unproject_position`) and clamped on-screen.
+- **Persistent status box (`StatusPanel`):** a bottom-right box showing the active unit's
+  full block during the MENU phase (the FFT two-box layout: menu one corner, status the
+  other); hidden in MOVE mode.
+- **Active-unit highlight = a tile marker**, not a unit effect: a translucent
+  blue(ally)/red(enemy) pad on the active unit's tile via `Battlefield.set_active_tile`
+  (same flat-`PlaneMesh` decal trick as the movement-path preview), tracked each frame in
+  `Main._process`. The cylinder renders normally.
+- **EXP lives on `Unit`** (`current_exp` + `EXP_PER_LEVEL` placeholder), shown in the stat
+  block — **not** a `StatBlock` field (see `docs/STATS.md`).
+
+**Why:**
+- **Reuse tile occupancy for hover** — `Battlefield` is already the picking/coordinate
+  authority and `_units_by_tile` already exists, so unit-hover is free and adds no physics
+  bodies to units. The tile under the cursor is the unit on it.
+- **Tile marker over a body glow** — it keeps the body's own side/class colors readable and
+  reads as "whose tile," the genre convention. We *tried and rejected* two glow approaches
+  first: an **inverted-hull additive shell** (looked like a translucent force-field, ground
+  showed through — read as a bug) and an **emissive body + `WorldEnvironment` bloom** (the
+  whole cylinder became a light source, washing out allegiance). Both are removed.
+- **EXP off `StatBlock`** — that schema is summed across base/growth/aptitude/banked;
+  experience is mutable per-unit progress like `current_hp`, so summing it there is
+  meaningless. Putting it on `Unit` now (with a named threshold) means future leveling code
+  has a clean field to read instead of a late, awkward retrofit.
+
+**Rejected:** giving units collision bodies just to hover them (unnecessary — tiles already
+have collision); a 3D `Label3D` for the floating panel (can't do the rounded translucent
+chrome the HUD uses); inverted-hull and emissive-bloom glows (see above); an `exp` field on
+`StatBlock` (wrong layer).
+
+---
+
 ## 2026-06-21 — Stat system as Resources; FFT-style per-level-up job banking
 
 **Decision:** Implemented the stat layer as Godot **Resources** (`scripts/stats/`),
