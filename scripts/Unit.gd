@@ -61,10 +61,22 @@ var level_history: Array[int] = []
 ## edit directly; change an input (class, level, aptitude) and recompute.
 var max_stats: StatBlock = null
 
+## Experience needed to gain one level. A flat placeholder until a real leveling curve
+## is designed — exposed now so EXP can be shown as "current / next", and so future
+## leveling code reads one named threshold instead of a magic number. See docs/STATS.md.
+const EXP_PER_LEVEL := 100
+
 ## Live, per-unit pools — the ONLY mutable stat state, kept off the shared templates
 ## (the shared-by-reference gotcha in the class docstring).
 var current_hp: int = 0
 var current_mp: int = 0
+
+## Experience banked toward the next level. A live per-unit counter (like `current_hp`),
+## deliberately NOT a `StatBlock` field: experience is mutable progress, not a class-
+## derived stat that sums across base/growth/aptitude — so it lives here, off the shared
+## templates. Tracked + displayed only for now; spending it on a level-up is wired when
+## the leveling system lands (see `level_up`).
+var current_exp: int = 0
 
 # --- Movement (visual glide between tiles) -----------------------------------
 
@@ -137,17 +149,23 @@ func _process(delta: float) -> void:
 		_move_queue.pop_front()
 
 
-## Toggle the "this is the active unit" highlight — a soft glow on the body so the
-## player can see whose turn it is. Uses the body's own material (each unit has its
-## own, so this never lights up other units).
-func set_active(active: bool) -> void:
-	var mat := _body.material_override as StandardMaterial3D
-	if mat == null:
-		return
-	mat.emission_enabled = active
-	if active:
-		mat.emission = Color(1.0, 0.95, 0.4)  # warm yellow glow
-		mat.emission_energy_multiplier = 0.5
+## Alpha of the active-tile marker, so the tile cap reads through the highlight rather
+## than being painted over. Tune for a stronger/fainter pad.
+const ACTIVE_MARKER_ALPHA := 0.6
+
+## The highlight color for a side — a bright, saturated version of the allegiance hue,
+## used by `Main` to tint the active-unit tile marker (blue ally / red enemy) so whose
+## turn it is reads at a glance. Brighter than `allegiance_color` (the body) so the
+## marker stands out from the unit standing on it; translucent so the surface shows
+## through. Magenta = unmapped side.
+static func active_color(side: Allegiance) -> Color:
+	match side:
+		Allegiance.PLAYER:
+			return Color(0.35, 0.6, 1.0, ACTIVE_MARKER_ALPHA)   # bright blue
+		Allegiance.ENEMY:
+			return Color(1.0, 0.35, 0.35, ACTIVE_MARKER_ALPHA)  # bright red
+		_:
+			return Color(Color.MAGENTA, ACTIVE_MARKER_ALPHA)
 
 
 ## Set this unit's side and class in one call, then refresh its look. The
@@ -230,11 +248,36 @@ func _aptitude() -> StatBlock:
 	return StatBlock.new()
 
 
-## One-line stat summary for debug prints: who, class, level, and the effective block.
+## One-line stat summary for debug prints: who, class, level, experience, and the block.
 func stats_summary() -> String:
-	var who: String = recruit.display_name if recruit != null else "(no recruit)"
 	var block: String = max_stats.describe() if max_stats != null else "(no stats)"
-	return "%s — L%d %s: %s" % [who, level, UnitClasses.display_name(unit_class), block]
+	return "%s — L%d %s (EXP %d/%d): %s" % [
+		display_name(), level, UnitClasses.display_name(unit_class),
+		current_exp, EXP_PER_LEVEL, block,
+	]
+
+
+## This unit's display name. Authored PCs and rolled enemies both carry a `recruit`
+## (the rolled ones get a name sampled from `UnitNames`), so this is the recruit name;
+## only legacy appearance-only spawns fall back to the bare class label.
+func display_name() -> String:
+	return recruit.display_name if recruit != null else UnitClasses.display_name(unit_class)
+
+
+## Multi-line stat readout for the floating hover/inspect panel — the same numbers as
+## `stats_summary`, laid out over a few lines so it reads at a glance above the unit's
+## head. HP/MP show current/max so the panel stays meaningful once combat spends them.
+func stats_panel_text() -> String:
+	if max_stats == null:
+		return "%s\n(no stats)" % display_name()
+	var s := max_stats
+	return "%s — L%d %s\nEXP %d/%d\nHP %d/%d   MP %d/%d\nMOV %d  JMP %d  SPD %d\nPATK %d  MATK %d\nPDEF %d  MDEF %d" % [
+		display_name(), level, UnitClasses.display_name(unit_class),
+		current_exp, EXP_PER_LEVEL,
+		current_hp, s.max_hp, current_mp, s.max_mp,
+		s.move, s.jump, s.speed,
+		s.phys_atk, s.mag_atk, s.phys_def, s.mag_def,
+	]
 
 
 # --- Appearance --------------------------------------------------------------

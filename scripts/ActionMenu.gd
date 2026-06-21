@@ -27,8 +27,15 @@ const _ITEM_SEPARATION := 14     ## Vertical gap between options.
 const _CORNER_RADIUS := 8        ## Slightly rounded corners, so it sits less starkly.
 const _SCREEN_MARGIN := 24       ## Gap from the bottom-left screen corner.
 
+## Color of the title (active unit's name) — brighter than the options so it reads as
+## a heading, not another selectable row.
+const _TITLE_COLOR := Color(0.95, 0.95, 1.0)
+
 ## Full-screen, click-through root. We toggle its visibility to show/hide the menu.
 var _root: Control
+
+## Heading line showing whose turn it is (the active unit's name).
+var _title: Label
 
 ## The vertical list the option labels live in.
 var _list: VBoxContainer
@@ -67,10 +74,24 @@ func _ready() -> void:
 	panel.add_theme_stylebox_override("panel", style)
 	_root.add_child(panel)
 
+	# A single column inside the panel: the title heading on top, the option list
+	# below it. Wrapping them lets the panel size to both together.
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", _ITEM_SEPARATION)
+	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(content)
+
+	# Title: the active unit's name. Built once here; its text is set by set_title.
+	_title = Label.new()
+	_title.add_theme_font_size_override("font_size", _FONT_SIZE)
+	_title.add_theme_color_override("font_color", _TITLE_COLOR)
+	_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_child(_title)
+
 	_list = VBoxContainer.new()
 	_list.add_theme_constant_override("separation", _ITEM_SEPARATION)
 	_list.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	panel.add_child(_list)
+	content.add_child(_list)
 
 
 ## Replace the menu's options (one label per entry). Call once after the menu is in
@@ -94,6 +115,12 @@ func set_highlighted(index: int) -> void:
 		var selected: bool = i == index
 		_labels[i].text = ("> " if selected else "   ") + str(_options[i])
 		_labels[i].add_theme_color_override("font_color", _HIGHLIGHT_COLOR if selected else _NORMAL_COLOR)
+
+
+## Set the heading text — the active unit's name, shown above the options so the
+## player can see whose turn it is.
+func set_title(text: String) -> void:
+	_title.text = text
 
 
 ## Show or hide the whole menu (used when entering / leaving the menu phase).

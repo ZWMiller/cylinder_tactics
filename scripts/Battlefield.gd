@@ -91,6 +91,17 @@ var _path_marker_material: StandardMaterial3D
 ## so sweeping the mouse around to preview routes never allocates per frame.
 var _path_markers: Array[MeshInstance3D] = []
 
+# --- Active-unit tile marker (see set_active_tile / clear_active_tile) --------
+
+## A single flat overlay laid on the active unit's tile — the FFT-style "whose turn
+## it is" highlight. One reusable node (only one unit is active at a time), recolored
+## per side and repositioned as the active unit changes or walks.
+var _active_marker: MeshInstance3D
+
+## The active marker's own material, so its color can be set per allegiance without
+## touching any other overlay.
+var _active_marker_material: StandardMaterial3D
+
 
 ## Godot lifecycle hook: runs once when the node enters the scene tree. We set up
 ## shared resources, fall back to the demo map if no config was supplied, build
@@ -114,6 +125,20 @@ func _ready() -> void:
 	_path_marker_material.albedo_color = Color(0.30, 0.80, 1.0, 0.5)
 	_path_marker_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_path_marker_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	# The active-unit tile highlight: one flat plane, nearly tile-sized, recolored per
+	# side. Same decal trick as the path markers — a PlaneMesh lying in the XZ plane,
+	# unshaded and translucent so it reads as a marker on the surface, not a slab.
+	var active_mesh := PlaneMesh.new()
+	active_mesh.size = Vector2(tile_size * 0.96, tile_size * 0.96)
+	_active_marker_material = StandardMaterial3D.new()
+	_active_marker_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_active_marker_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_active_marker = MeshInstance3D.new()
+	_active_marker.mesh = active_mesh
+	_active_marker.material_override = _active_marker_material
+	_active_marker.visible = false
+	add_child(_active_marker)
 
 	# If nobody supplied a map configuration, use the built-in demo.
 	if states.is_empty():
@@ -265,6 +290,21 @@ func show_path(tiles: Array) -> void:
 func clear_path() -> void:
 	for marker in _path_markers:
 		marker.visible = false
+
+
+## Highlight `tile` as the active unit's tile, tinted `color` (the caller picks the
+## allegiance hue). Lifted a hair more than the path markers (0.04 vs 0.03) so the two
+## never z-fight when they overlap. Call again to move/recolor it; cheap to call every
+## frame so the marker can track a walking unit.
+func set_active_tile(tile: Vector2i, color: Color) -> void:
+	_active_marker_material.albedo_color = color
+	_active_marker.position = tile_to_world(tile.x, tile.y) + Vector3(0.0, 0.04, 0.0)
+	_active_marker.visible = true
+
+
+## Hide the active-unit tile highlight (e.g. when there is no active unit).
+func clear_active_tile() -> void:
+	_active_marker.visible = false
 
 
 ## Ray-pick the tile under a screen point (e.g. the mouse position) using `camera`.

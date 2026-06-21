@@ -19,23 +19,48 @@ extends Node3D
 ## time, so each `.instantiate()` is just a cheap clone of an already-loaded scene.
 const UNIT_SCENE := preload("res://scenes/Unit.tscn")
 
-## The actions offered at the start of a turn, in menu order.
-const MENU_OPTIONS := ["Move", "End Turn"]
+## The authored player characters (hand-made `Recruit.tres` with real aptitudes), one
+## per class. `preload` resolves them at parse time, so a renamed/missing file is a
+## loud editor error rather than a silent runtime null.
+const RECRUIT_BRON := preload("res://assets/recruits/bron.tres")  # Soldier
+const RECRUIT_DART := preload("res://assets/recruits/dart.tres")  # Archer
+const RECRUIT_WISP := preload("res://assets/recruits/wisp.tres")  # Mage
+
+## The actions offered at the start of a turn, in menu order. "Stats" inspects the
+## active unit (prints its block + pins the floating panel) so the new stat system is
+## verifiable in-game.
+const MENU_OPTIONS := ["Move", "Stats", "End Turn"]
+
+## How long (seconds) the cursor must rest on a unit before its stat panel pops up.
+const HOVER_DELAY := 1.0
+
+## How far above a unit's origin to float its stat panel, in world units.
+const STAT_PANEL_HEIGHT := 2.6
 
 ## The two input phases of a turn: choosing an action, or placing a move.
 enum Phase { MENU, MOVE }
 
-## One demo unit per row entry: [grid_x, grid_z, allegiance, class]. A player row
-## and an enemy row, each showing all three classes, so both visual channels read
-## at a glance (body color = side, hat shape+color = class).
-@onready var _demo_roster := [
-	[10, 10, Unit.Allegiance.PLAYER, UnitClasses.Class.SOLDIER],
-	[12, 10, Unit.Allegiance.PLAYER, UnitClasses.Class.ARCHER],
-	[14, 10, Unit.Allegiance.PLAYER, UnitClasses.Class.MAGE],
-	[10, 13, Unit.Allegiance.ENEMY, UnitClasses.Class.SOLDIER],
-	[12, 13, Unit.Allegiance.ENEMY, UnitClasses.Class.ARCHER],
-	[14, 13, Unit.Allegiance.ENEMY, UnitClasses.Class.MAGE],
+## Authored player units: [grid_x, grid_z, Recruit]. Each spawns via
+## `Unit.init_from_recruit`, so it carries a real class, level, aptitude and stat
+## block — not the old appearance-only baseline.
+@onready var _player_roster := [
+	[10, 10, RECRUIT_BRON],
+	[12, 10, RECRUIT_DART],
+	[14, 10, RECRUIT_WISP],
 ]
+
+## Enemy units: [grid_x, grid_z, class, level]. Unlike PCs these have no authored
+## file — each is rolled into a random `Recruit` (random name + aptitude) at the given
+## class/level by `StatRoll`. Level 3 so banked level-up growth is visible in-game.
+@onready var _enemy_roster := [
+	[10, 13, UnitClasses.Class.SOLDIER, 3],
+	[12, 13, UnitClasses.Class.ARCHER, 3],
+	[14, 13, UnitClasses.Class.MAGE, 3],
+]
+
+## RNG for rolling enemies. Fixed seed (not `randomize()`) for now so each run spawns
+## the same foes — reproducible while we test; swap to `randomize()` for variety later.
+var _rng := RandomNumberGenerator.new()
 
 ## The terrain grid, cached so the click handler can ray-pick tiles against it.
 @onready var _battlefield: Battlefield = $Battlefield
@@ -45,6 +70,10 @@ enum Phase { MENU, MOVE }
 
 ## The bottom-left action HUD. Created in code in `_ready`.
 var _menu: ActionMenu
+
+## The bottom-right active-unit status box, shown during the menu phase. Created in
+## code in `_ready`.
+var _status_panel: StatusPanel
 
 ## Which input phase we're in right now (see Phase).
 var _phase: Phase = Phase.MENU
@@ -72,6 +101,21 @@ var _planned_waypoints: Array[Vector2i] = []
 ## actually changes (mouse-move fires far more often than the hovered tile changes).
 var _hovered_tile: Vector2i = Battlefield.INVALID_TILE
 
+## Floating HUD box that shows a unit's stat block above its head. One reusable view,
+## repositioned/retexted per target; hidden when nothing is being inspected.
+var _stat_panel: StatPanel
+
+## The unit the cursor is currently resting on (or null). Drives the hover dwell timer.
+var _hover_unit: Unit = null
+
+## Seconds the cursor has rested on `_hover_unit` — counts up to HOVER_DELAY, then the
+## panel shows. Reset whenever the hovered unit changes.
+var _hover_elapsed: float = 0.0
+
+## True while the "Stats" menu option is pinning the panel to the active unit. Pinned
+## mode wins over hover, so moving the mouse doesn't dismiss a deliberately-opened panel.
+var _stats_pinned: bool = false
+
 
 ## Godot lifecycle hook. A parent's `_ready` runs *after* its children's, so the
 ## Battlefield's tiles already exist. Build the HUD, spawn the roster, then start the
@@ -81,10 +125,57 @@ func _ready() -> void:
 	add_child(_menu)            # runs ActionMenu._ready synchronously, building its UI
 	_menu.build(MENU_OPTIONS)
 
-	for entry in _demo_roster:
-		_spawn(entry[0], entry[1], entry[2], entry[3])
+	_stat_panel = StatPanel.new()
+	add_child(_stat_panel)            # runs StatPanel._ready synchronously, building its UI
+
+	_status_panel = StatusPanel.new()
+	add_child(_status_panel)          # runs StatusPanel._ready synchronously, building its UI
+
+	_rng.seed = 12345          # fixed seed: same rolled enemies every run while testing
+
+	# Players from authored recruits; enemies rolled from class+level into recruits.
+	for entry in _player_roster:
+		_spawn_recruit(entry[0], entry[1], Unit.Allegiance.PLAYER, entry[2])
+	for entry in _enemy_roster:
+		var foe := StatRoll.random_recruit(entry[2], entry[3], _rng)
+		_spawn_recruit(entry[0], entry[1], Unit.Allegiance.ENEMY, foe)
+
 	if not _player_units.is_empty():
 		_set_active_unit(_player_units[0])
+
+
+## Godot lifecycle hook: runs every frame. Drives the hover-to-inspect panel — after
+## the cursor rests on a unit for HOVER_DELAY it shows that unit's stats; the panel
+## follows whichever unit it's bound to. When the "Stats" option has pinned the panel,
+## hover detection is skipped so the pin sticks.
+func _process(delta: float) -> void:
+	# Keep the active-unit tile marker glued to the active unit's tile (it walks; the
+	# map can shift) — independent of the stat-panel logic below.
+	_update_active_marker()
+
+	if _stats_pinned:
+		_position_stat_panel(_active_unit)
+		return
+
+	# Hovering a unit = hovering the tile it stands on. Units have no collision of
+	# their own, but their tile does, so we ray-pick the tile and look up its occupant
+	# — reusing the Battlefield as the single coordinate/picking authority.
+	var tile := _battlefield.tile_at_screen_point(_camera, get_viewport().get_mouse_position())
+	var unit: Unit = _units_by_tile.get(tile)
+
+	if unit != _hover_unit:
+		# Moved onto a different unit (or off all units): restart the dwell timer.
+		_hover_unit = unit
+		_hover_elapsed = 0.0
+		_hide_stat_panel()
+	elif unit != null and not _stat_panel.is_open():
+		# Still resting on the same unit and not yet shown — count toward the delay.
+		_hover_elapsed += delta
+		if _hover_elapsed >= HOVER_DELAY:
+			_show_stat_panel(unit)
+
+	if _stat_panel.is_open():
+		_position_stat_panel(unit)
 
 
 ## Godot's earliest input hook — runs before any node's `_unhandled_input`. We handle
@@ -118,19 +209,43 @@ func _unhandled_input(event: InputEvent) -> void:
 # --- Menu phase --------------------------------------------------------------
 
 
-## Set the highlighted option, wrapping around the ends, and update the HUD.
+## Set the highlighted option, wrapping around the ends, and update the HUD. Moving
+## the highlight also dismisses a pinned stats panel — navigating away closes it.
 func _set_menu_index(index: int) -> void:
 	_menu_index = wrapi(index, 0, MENU_OPTIONS.size())  # wrapi keeps it in [0, size)
 	_menu.set_highlighted(_menu_index)
+	_unpin_stats()
 
 
-## Run the highlighted option: enter move mode, or end the turn.
+## Run the highlighted option: enter move mode, inspect stats, or end the turn.
 func _activate_menu_option() -> void:
 	match MENU_OPTIONS[_menu_index]:
 		"Move":
 			_enter_move_phase()
+		"Stats":
+			_inspect_active_unit()
 		"End Turn":
 			_cycle_active_unit()
+
+
+## "Stats" action: print the active unit's full block (for console verification) and
+## pin the floating panel to it so the owner can read the stats in-world. Pinned until
+## the player navigates the menu or the turn changes.
+func _inspect_active_unit() -> void:
+	if _active_unit == null:
+		return
+	print(_active_unit.stats_summary())
+	_stats_pinned = true
+	_show_stat_panel(_active_unit)
+
+
+## Drop a pinned stats panel (if any) and reset hover so it can re-trigger cleanly.
+func _unpin_stats() -> void:
+	if not _stats_pinned:
+		return
+	_stats_pinned = false
+	_hover_unit = null
+	_hide_stat_panel()
 
 
 # --- Move phase --------------------------------------------------------------
@@ -244,16 +359,23 @@ func _start_turn() -> void:
 	_phase = Phase.MENU
 	_menu_index = 0
 	_clear_plan()
+	_unpin_stats()
 	_hovered_tile = Battlefield.INVALID_TILE
 	_menu.set_menu_visible(true)
 	_menu.set_highlighted(_menu_index)
+	# Show the active unit's persistent status box alongside the menu (FFT layout).
+	if _active_unit != null:
+		_status_panel.show_for(_active_unit.stats_panel_text())
 
 
-## Switch from the menu into placing a move: hide the menu and start fresh.
+## Switch from the menu into placing a move: hide the menu (and the status box) and
+## start fresh.
 func _enter_move_phase() -> void:
 	_phase = Phase.MOVE
 	_menu.set_menu_visible(false)
+	_status_panel.hide_panel()
 	_clear_plan()
+	_unpin_stats()
 	_hovered_tile = Battlefield.INVALID_TILE
 
 
@@ -263,15 +385,17 @@ func _clear_plan() -> void:
 	_battlefield.clear_path()
 
 
-## Instantiate one unit, skin it, stand it on tile (x, z), and register it in the
-## occupancy map (and the player roster if it's ours).
-func _spawn(x: int, z: int, side: Unit.Allegiance, klass: UnitClasses.Class) -> void:
+## Instantiate one unit from a `Recruit`, stand it on tile (x, z), and register it in
+## the occupancy map (and the player roster if it's ours). Both authored PCs and rolled
+## enemies arrive here as a Recruit, so they share one rich spawn path.
+func _spawn_recruit(x: int, z: int, side: Unit.Allegiance, recruit: Recruit) -> void:
 	var unit: Unit = UNIT_SCENE.instantiate()
-	# configure() before add_child: the values are stored now and applied by the
-	# unit's own _ready when it enters the tree on the next line.
-	unit.configure(side, klass)
+	# Set allegiance (the body-color channel) before add_child so the unit's own _ready
+	# colors the body correctly; class/level/stats are adopted from the recruit next.
+	unit.allegiance = side
 	unit.grid_coord = Vector2i(x, z)
-	_battlefield.add_child(unit)
+	_battlefield.add_child(unit)        # fires Unit._ready (appearance + baseline stats)
+	unit.init_from_recruit(recruit)     # adopt real class/level/aptitude → max_stats, reskin
 	# Initial placement is instant (set position directly); only later moves walk.
 	unit.position = _battlefield.tile_to_world(x, z)
 
@@ -280,15 +404,53 @@ func _spawn(x: int, z: int, side: Unit.Allegiance, klass: UnitClasses.Class) -> 
 		_player_units.append(unit)
 
 
-## Make `unit` the active one: clear the previous unit's highlight, swap the pointer,
-## highlight the new one, and start its turn (which opens the menu).
+# --- Stat inspect panel (hover + "Stats" action) -----------------------------
+
+## Fill the panel with `unit`'s stats and reveal it. Position is set each frame by
+## `_position_stat_panel` so it tracks a unit that's moving.
+func _show_stat_panel(unit: Unit) -> void:
+	if unit == null:
+		return
+	_stat_panel.show_text(unit.stats_panel_text())
+
+
+## Hide the floating stat panel.
+func _hide_stat_panel() -> void:
+	_stat_panel.hide_panel()
+
+
+## Park the panel above `unit`'s head (or hide it if there's no target). The panel is
+## a screen-space HUD box, so we project the unit's head — a point STAT_PANEL_HEIGHT
+## world units above its origin — onto the screen and place the box there. Called every
+## frame while the panel is up so it follows a walking unit.
+func _position_stat_panel(unit: Unit) -> void:
+	if unit == null:
+		_hide_stat_panel()
+		return
+	var head := unit.global_position + Vector3.UP * STAT_PANEL_HEIGHT
+	_stat_panel.place_above(_camera.unproject_position(head))
+
+
+## Make `unit` the active one: swap the pointer, mark its tile (the FFT-style "whose
+## turn" highlight, tinted by side), set the menu title, and start its turn. The marker
+## is kept tracking the unit's tile each frame in `_process`.
 func _set_active_unit(unit: Unit) -> void:
-	if _active_unit != null:
-		_active_unit.set_active(false)
 	_active_unit = unit
 	if _active_unit != null:
-		_active_unit.set_active(true)
+		_menu.set_title(_active_unit.display_name())  # show whose turn it is
+		_update_active_marker()
+	else:
+		_battlefield.clear_active_tile()
 	_start_turn()
+
+
+## Place/recolor the active-unit tile marker on the active unit's current tile. Cheap,
+## and called every frame from `_process` so the marker follows the unit as it walks and
+## stays correct after a time-shift changes tile heights.
+func _update_active_marker() -> void:
+	if _active_unit == null:
+		return
+	_battlefield.set_active_tile(_active_unit.grid_coord, Unit.active_color(_active_unit.allegiance))
 
 
 ## Advance the active unit to the next player unit (wrapping) — i.e. "End Turn". A

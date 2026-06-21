@@ -46,10 +46,10 @@ static func random_aptitude(rng: RandomNumberGenerator) -> StatBlock:
 ## along on the returned Recruit (`starting_class` / `starting_level`), so the spawner
 ## hands it straight to a `Unit` with no extra bookkeeping; the unit assumes the
 ## recruit leveled the whole way in `class_id` when seeding its level history.
-## `name_prefix` lets a spawner label them (e.g. "Bandit").
-static func random_recruit(class_id: int, level: int, rng: RandomNumberGenerator, name_prefix: String = "Foe") -> Recruit:
+## The name is sampled from `UnitNames` so rolled foes read as people, not "Foe 0123".
+static func random_recruit(class_id: int, level: int, rng: RandomNumberGenerator) -> Recruit:
 	var r := Recruit.new()
-	r.display_name = "%s %04d" % [name_prefix, rng.randi_range(0, 9999)]
+	r.display_name = UnitNames.random_name(rng)
 	r.aptitude = random_aptitude(rng)
 	r.starting_class = class_id
 	r.starting_level = maxi(1, level)  # a unit is at least level 1
