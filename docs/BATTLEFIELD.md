@@ -60,6 +60,27 @@ shift without reaching into internals:
 - `advance_shift()` — move to the next state (wrapping) and redraw. *Later* this will
   also re-settle units and apply fall damage; today it only changes terrain.
 
+## Movement: reachability, legality & overlays
+
+The grid owns movement math (it's the coordinate/occupancy authority); `Main` only
+snapshots constraints and renders. Heights compare in raw integer *levels* (same units
+as a unit's `jump` stat), and each orthogonal step costs 1 `move` point.
+
+- `reachable_tiles(start, move, jump, solid, occupied)` — uniform-cost BFS of every tile
+  the unit can reach **and stop on**. A step needs `|Δheight| ≤ jump` and a non-`solid`
+  neighbour; `occupied` tiles (any unit) are walked *through* but excluded from the
+  result. `solid` = enemy tiles (impassable); `occupied` = all units (can't stop on).
+- `classify_path(tiles, move, jump, solid, occupied)` — per-tile blue/red legality for a
+  concrete expanded path (over-budget / jump-too-tall / into `solid` / final tile
+  `occupied` → illegal, and everything after a failure too). Drives both the preview and
+  the commit gate (any `false` ⇒ move refused).
+- `show_move_range(reachable)` / `clear_move_range()` — draws the reachable region as a
+  black **outline**: horizontal top-lines on edges facing outside the region, plus thin
+  vertical **corner posts** wherever the outline steps between heights (so it follows
+  terraces continuously). Corners are tracked in a doubled-integer lattice.
+- `show_path(tiles, legal_flags)` / `clear_path()` — the path preview; blue legal tiles,
+  red illegal ones (per `classify_path`).
+
 ## Configuration
 
 Inspector-exported on the `Battlefield` node: `grid_width`, `grid_height` (default

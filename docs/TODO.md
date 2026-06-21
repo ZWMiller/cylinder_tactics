@@ -52,15 +52,17 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       in `Main._process`. Replaced an earlier body-emission + bloom approach.
 - [x] EXP tracking — `Unit.current_exp` + `EXP_PER_LEVEL` placeholder, shown in the stat
       block. Lives on `Unit` (mutable progress), deliberately NOT a `StatBlock` field.
+- [x] Movement range + jump gate — picking "Move" outlines the unit's reachable region
+      (`Battlefield.reachable_tiles` BFS: 1 move-point/step, step legal iff `|Δheight| ≤
+      jump`, walk through allies but not enemies, can't stop on an occupied tile). The path
+      preview is coloured per tile blue(legal)/red(illegal) via `Battlefield.classify_path`,
+      and the same classifier gates the commit (any red tile refuses the move). Range drawn
+      as an **outline** (border strips on edges facing outside the region), not a fill. See
+      `docs/DECISION_LOG.md`.
 
 ## Next
 
 ### Then
-- [ ] **Jump-height gate** — NOW UNBLOCKED (units have a real `jump` stat in `max_stats`).
-      Reject a move when any `Battlefield.path_step_heights(path)` step exceeds the active
-      unit's `max_stats.jump`. Tint the preview red / refuse the commit when illegal.
-- [ ] Movement range limit — clicks currently move the active unit *anywhere*; gate by
-      grid distance + Z cost against `max_stats.move` (Battlefield helpers own reachability)
 - [ ] Turn order / turn-based loop — will *set* `_active_unit` from `max_stats.speed`,
       replacing the temporary Tab cycle. **Do this as the first `TurnManager` extraction**
       (see the Architecture section) rather than growing the logic inside `Main`.

@@ -6,6 +6,46 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-21 — Movement range + jump gate: BFS reachability on Battlefield, outline + blue/red preview
+
+**Decision:** Gated movement by a unit's `move` and `jump` stats with live visual feedback.
+Reachability/legality math lives on `Battlefield` (the coordinate/occupancy authority); the
+overlays are Battlefield decals; `Main` only snapshots constraints and renders.
+
+- **Cost model — 1 move-point per orthogonal step; height is jump-gated, not move-priced.**
+  A step is walkable iff `|Δheight| ≤ jump` (heights compared in raw integer *levels*, the
+  same units as the `jump` stat — `height_step` world-scaling is irrelevant to the gate).
+  No extra move cost for climbing. Rejected height-as-move-cost (less legible budget, more
+  tuning) per the small-numbers philosophy; matches FFT.
+- **Occupancy — walk through allies, not enemies.** `Main._compute_move_constraints` builds
+  two sets from `_units_by_tile`: `solid` (enemy tiles — impassable) and `occupied` (any
+  unit — can't stop on). `reachable_tiles` floods *through* `occupied` (so allies don't wall
+  you in) but excludes them from the stoppable result; `solid` tiles are never entered.
+- **`Battlefield.reachable_tiles(start, move, jump, solid, occupied)`** — uniform-cost BFS
+  (queue + visited dict; first arrival is shortest), returns `{Vector2i: cost}`. Snapshotted
+  once when move mode opens (occupancy is fixed until the unit actually moves), not per frame.
+- **`Battlefield.classify_path(tiles, move, jump, solid, occupied)`** — per-tile blue/red
+  legality for a *concrete expanded path* (start always legal; a tile fails on over-budget /
+  jump-too-tall / entering `solid` / final-tile-`occupied`, and everything after a failure is
+  red too). Drives the preview AND the commit gate (a path with any `false` is refused).
+- **Range drawn as an OUTLINE, not a fill** (owner's call). `show_move_range` lays a thin
+  opaque **black** strip on each reachable-tile edge that faces a non-reachable tile (or the
+  grid border), tracing the region's silhouette; interior stays clear. (Black, not blue — a
+  blue outline washed out against the sky where the region touched the grid edge.) Same grown-on-demand decal
+  pool as the path markers. The path preview reuses the marker pool with a second **red**
+  material for illegal tiles.
+
+**Why:** Keeps the reachability logic with the grid (consistent with the click→tile and
+path helpers already on `Battlefield`), so `Main` stays a coordinator. Two overlays (static
+range outline + dynamic blue/red route) give FFT-style "where can I go" + "is this route
+legal" feedback. Computing constraints once per move (not per mouse-move) keeps hover cheap.
+
+**Rejected:** filling reachable tiles (owner preferred a border outline); per-step Z move
+cost (legibility); treating all units as hard blocks (you couldn't slip past your own line);
+diagonal movement (movement is orthogonal-stepped already).
+
+---
+
 ## 2026-06-21 — Stat HUD, hover-inspect via tile occupancy, tile-marker highlight, EXP on Unit
 
 **Decision:** Made the stat system visible in-game and reworked the active-unit highlight.

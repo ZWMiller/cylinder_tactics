@@ -101,6 +101,17 @@ var _planned_waypoints: Array[Vector2i] = []
 ## actually changes (mouse-move fires far more often than the hovered tile changes).
 var _hovered_tile: Vector2i = Battlefield.INVALID_TILE
 
+## The active unit's movement constraints for the in-progress Move, snapshotted when the
+## move phase opens (occupancy and the unit's start tile don't change until it actually
+## moves, so we compute these once instead of per mouse-move):
+##   - `_reachable`  : { Vector2i: cost } the unit can reach + stop on (drives the outline)
+##   - `_move_solid` : tiles it cannot enter at all (enemy units)
+##   - `_move_occupied` : tiles it can pass through but not stop on (any unit)
+## `_move_solid`/`_move_occupied` feed the per-tile blue/red legality of the path preview.
+var _reachable: Dictionary = {}
+var _move_solid: Dictionary = {}
+var _move_occupied: Dictionary = {}
+
 ## Floating HUD box that shows a unit's stat block above its head. One reusable view,
 ## repositioned/retexted per target; hidden when nothing is being inspected.
 var _stat_panel: StatPanel
@@ -282,7 +293,13 @@ func _refresh_path_preview() -> void:
 	if _active_unit.is_moving() or _hovered_tile == Battlefield.INVALID_TILE:
 		_battlefield.clear_path()
 		return
-	_battlefield.show_path(Battlefield.expand_path(_planned_route(_hovered_tile)))
+	# Expand the waypoint route into adjacent steps, classify each as legal/illegal
+	# against the unit's move budget + jump + occupancy, and light the tiles blue/red.
+	var tile_path := Battlefield.expand_path(_planned_route(_hovered_tile))
+	var flags := _battlefield.classify_path(
+		tile_path, _active_unit.max_stats.move, _active_unit.max_stats.jump,
+		_move_solid, _move_occupied)
+	_battlefield.show_path(tile_path, flags)
 
 
 ## Build the route tile list: current tile -> committed waypoints -> `destination`
@@ -322,24 +339,23 @@ func _commit_move(screen_point: Vector2) -> void:
 		return
 
 	var route := _planned_route(destination)
-	var final_tile: Vector2i = route.back()
-	# Don't stack two units. (Intermediate-tile checks come with reachability later.)
-	if _units_by_tile.has(final_tile) and _units_by_tile[final_tile] != _active_unit:
-		return
 
 	# Densify into adjacent tile steps; bail (stay in move mode) if nowhere to go.
 	var tile_path := Battlefield.expand_path(route)
 	if tile_path.size() < 2:
 		return
 
-	# Future jump gate hooks here: compare Battlefield.path_step_heights(tile_path)
-	# against the unit's jump stat and reject the move if any step is too tall. For
-	# now just surface the tallest step so the data is visible while we test.
-	var tallest := 0.0
-	for step in _battlefield.path_step_heights(tile_path):
-		tallest = max(tallest, abs(step))
-	print("Move: %d tiles, tallest step %.2f" % [tile_path.size(), tallest])
+	# Gate the move: every step must clear the jump height, stay within the move budget,
+	# avoid enemy tiles, and not end on an occupied tile. `classify_path` flags each tile;
+	# if any is illegal we refuse and stay in move mode — the preview is already showing
+	# the player exactly which tiles (the red ones) made it illegal.
+	var flags := _battlefield.classify_path(
+		tile_path, _active_unit.max_stats.move, _active_unit.max_stats.jump,
+		_move_solid, _move_occupied)
+	if flags.has(false):
+		return
 
+	var final_tile: Vector2i = tile_path.back()
 	# Update occupancy to the destination, then walk the stepped polyline.
 	_units_by_tile.erase(_active_unit.grid_coord)
 	_active_unit.grid_coord = final_tile
@@ -377,12 +393,39 @@ func _enter_move_phase() -> void:
 	_clear_plan()
 	_unpin_stats()
 	_hovered_tile = Battlefield.INVALID_TILE
+	# Snapshot the unit's reach for this turn and outline it on the map.
+	_compute_move_constraints()
+	_battlefield.show_move_range(_reachable)
 
 
-## Drop any planned waypoints and hide the path preview (back to a clean slate).
+## Snapshot what limits the active unit's move THIS turn: the set of tiles it can reach
+## and stop on (for the range outline) plus the solid/occupied tile sets (for the
+## blue/red path legality). Computed once when move mode opens because none of it changes
+## until the unit actually moves — occupancy is fixed and the unit is still on its start
+## tile. Other units' tiles are classified by side: ANY unit blocks stopping, but only an
+## ENEMY blocks passage (you may walk through an ally, just not stop on one).
+func _compute_move_constraints() -> void:
+	_move_solid = {}
+	_move_occupied = {}
+	for tile in _units_by_tile:
+		var u: Unit = _units_by_tile[tile]
+		if u == _active_unit:
+			continue
+		_move_occupied[tile] = true
+		if u.allegiance != _active_unit.allegiance:
+			_move_solid[tile] = true
+	_reachable = _battlefield.reachable_tiles(
+		_active_unit.grid_coord, _active_unit.max_stats.move, _active_unit.max_stats.jump,
+		_move_solid, _move_occupied)
+
+
+## Drop any planned waypoints and hide the path preview + move-range outline (back to a
+## clean slate). Called on every entry to and exit from move mode, so both overlays are
+## consistently cleared when leaving and freshly redrawn when re-entering.
 func _clear_plan() -> void:
 	_planned_waypoints.clear()
 	_battlefield.clear_path()
+	_battlefield.clear_move_range()
 
 
 ## Instantiate one unit from a `Recruit`, stand it on tile (x, z), and register it in

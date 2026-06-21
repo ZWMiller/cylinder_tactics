@@ -33,6 +33,19 @@ const INVALID_TILE := Vector2i(-1, -1)
 ## works; 1000 is plenty and cheap.
 const _PICK_RAY_LENGTH := 1000.0
 
+## Thickness (world units) of the move-range outline strip across the edge it traces —
+## thin, so it reads as a drawn border line rather than a filled band. Used as the strip's
+## depth for both the horizontal top edges and the vertical cliff-face connectors.
+const _RANGE_BORDER_WIDTH := 0.09
+
+## Vertical thickness (world units) of a horizontal outline strip. Just enough to read as
+## a solid line from the ortho camera without poking visibly above the tile surface.
+const _RANGE_STRIP_THICKNESS := 0.04
+
+## The four orthogonal grid steps (no diagonals), reused by the reachability flood and
+## the range-outline edge test. `.y` is the grid Z axis (tiles are addressed (x, z)).
+const _ORTHO_DIRS := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+
 # --- Configuration (editable in the Inspector; this is what @export means) ----
 
 ## Number of tiles along the X axis. There is intentionally no upper limit.
@@ -83,13 +96,32 @@ var _tiles: Array = []
 ## Shared flat mesh laid over a tile to "light it up" as part of a previewed path.
 var _path_marker_mesh: PlaneMesh
 
-## Shared translucent material for the path markers (all markers look the same, so
-## one material is fine — unlike per-unit materials, we never recolor one alone).
+## Shared translucent material for LEGAL path-marker tiles (blue) — steps the active
+## unit is allowed to take. Per-marker `material_override` swaps in the illegal one below
+## for tiles that fail the move budget / jump gate / occupancy (see show_path).
 var _path_marker_material: StandardMaterial3D
+
+## Shared translucent material for ILLEGAL path-marker tiles (red) — a step that exceeds
+## the unit's jump, runs past its move budget, or ends on an occupied tile.
+var _path_illegal_material: StandardMaterial3D
 
 ## A reusable pool of marker nodes. We grow it on demand and hide the leftovers,
 ## so sweeping the mouse around to preview routes never allocates per frame.
 var _path_markers: Array[MeshInstance3D] = []
+
+# --- Move-range outline overlay (see show_move_range / clear_move_range) -------
+
+## A 1x1x1 box, scaled per segment into a thin horizontal sliver (a top edge) or a thin
+## vertical sliver (a cliff-face connector). A box rather than a flat plane lets the one
+## shared mesh form BOTH, so the outline can drop down terrain steps and stay continuous.
+var _range_strip_mesh: BoxMesh
+
+## Shared bright-blue material for the move-range outline (all segments look alike).
+var _range_material: StandardMaterial3D
+
+## Grown-on-demand pool of outline strips, leftovers hidden — same no-per-frame-alloc
+## trick as the path markers.
+var _range_markers: Array[MeshInstance3D] = []
 
 # --- Active-unit tile marker (see set_active_tile / clear_active_tile) --------
 
@@ -125,6 +157,24 @@ func _ready() -> void:
 	_path_marker_material.albedo_color = Color(0.30, 0.80, 1.0, 0.5)
 	_path_marker_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_path_marker_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	# The red twin used for path tiles the move can't legally reach (jump too tall,
+	# beyond the move budget, or an occupied destination). Same flat translucent decal.
+	_path_illegal_material = StandardMaterial3D.new()
+	_path_illegal_material.albedo_color = Color(1.0, 0.30, 0.30, 0.5)
+	_path_illegal_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_path_illegal_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	# Move-range outline: one shared 1x1 flat strip (scaled per edge segment) and one
+	# opaque BLACK material. Drawn only along the border of the reachable region (see
+	# show_move_range), so the interior stays clear. Black (not blue) so the border reads
+	# like a crisp menu line against any backdrop — a blue outline washed out against the
+	# sky where the region met the grid edge. Opaque + unshaded keeps it a flat, even line.
+	_range_strip_mesh = BoxMesh.new()
+	_range_strip_mesh.size = Vector3.ONE
+	_range_material = StandardMaterial3D.new()
+	_range_material.albedo_color = Color(0.05, 0.05, 0.05)
+	_range_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 
 	# The active-unit tile highlight: one flat plane, nearly tile-sized, recolored per
 	# side. Same decal trick as the path markers — a PlaneMesh lying in the XZ plane,
@@ -263,10 +313,93 @@ func path_step_heights(tiles: Array) -> Array:
 	return heights
 
 
+## The integer height "level" of tile (x, z) in the current state — the raw value
+## before `height_step` world scaling. The jump gate compares these directly against a
+## unit's `jump` stat, which is also expressed in height-levels (not world units).
+func _height_units(x: int, z: int) -> int:
+	return current_state()[x][z]["height"]
+
+
+## Breadth-first flood of every tile the active unit can both REACH and legally STOP on
+## from `start`, spending at most `move_points` orthogonal steps. Each step costs 1; a
+## step is walkable only when the height change to the neighbour is within `jump` AND the
+## neighbour isn't in `solid` (impassable — e.g. an enemy unit). Tiles in `occupied`
+## (any unit standing there) can be walked THROUGH but not stopped on, so they still
+## expand the flood yet are left out of the returned set. Returns `{ Vector2i: cost }`,
+## always including `start` at cost 0. This is the data the move-range outline draws from.
+##
+## Uniform step cost means plain BFS suffices: the first time a tile is reached is along
+## a shortest route, so a tile already in `costs` never needs revisiting.
+func reachable_tiles(start: Vector2i, move_points: int, jump: int, solid: Dictionary, occupied: Dictionary) -> Dictionary:
+	# `costs` records every visited tile (including walked-through occupied ones) so the
+	# flood won't re-expand them; `result` holds only the tiles that are legal to stop on.
+	var costs := {start: 0}
+	var result := {start: 0}
+	var frontier: Array[Vector2i] = [start]
+	var head := 0   # index-based queue front — cheaper than pop_front() on a big flood
+	while head < frontier.size():
+		var cur: Vector2i = frontier[head]
+		head += 1
+		var cur_cost: int = costs[cur]
+		if cur_cost >= move_points:
+			continue   # no budget left to step further from here
+		for dir in _ORTHO_DIRS:
+			var n: Vector2i = cur + dir
+			if n.x < 0 or n.x >= grid_width or n.y < 0 or n.y >= grid_height:
+				continue   # off the grid
+			if costs.has(n):
+				continue   # already reached along an equal/shorter route
+			if solid.has(n):
+				continue   # impassable tile (enemy unit)
+			if abs(_height_units(n.x, n.y) - _height_units(cur.x, cur.y)) > jump:
+				continue   # climb/drop is taller than this unit's jump
+			costs[n] = cur_cost + 1
+			if not occupied.has(n):
+				result[n] = cur_cost + 1   # reachable AND free to stand on
+			frontier.append(n)
+	return result
+
+
+## Per-tile legality for a concrete, already-expanded `tiles` path (parallel to it). The
+## start tile (index 0) is always legal — the unit is standing on it. Walking outward, a
+## step stays legal only while every prior step was legal AND: its index (== cumulative
+## cost, since each step is one tile) is within `move_points`, the height change is within
+## `jump`, and it doesn't enter a `solid` tile; additionally the FINAL tile must not be
+## `occupied` (you can pass through an ally but not stop on one). Once a tile is illegal,
+## every later tile is too. This drives the blue/red split in the path preview, and the
+## commit gate reuses it (a path with any `false` is refused).
+func classify_path(tiles: Array, move_points: int, jump: int, solid: Dictionary, occupied: Dictionary) -> Array:
+	var flags: Array[bool] = []
+	if tiles.is_empty():
+		return flags
+	flags.append(true)   # tiles[0] is the unit's current tile — always fine
+	var last := tiles.size() - 1
+	var legal_so_far := true
+	for i in range(1, tiles.size()):
+		var ok := legal_so_far
+		if ok:
+			var climb: int = abs(_height_units(tiles[i].x, tiles[i].y) - _height_units(tiles[i - 1].x, tiles[i - 1].y))
+			if i > move_points:
+				ok = false            # past the move budget
+			elif climb > jump:
+				ok = false            # step too tall for this unit's jump
+			elif solid.has(tiles[i]):
+				ok = false            # stepped into an impassable (enemy) tile
+			elif i == last and occupied.has(tiles[i]):
+				ok = false            # can't stop on a tile a unit already holds
+		flags.append(ok)
+		legal_so_far = legal_so_far and ok
+	return flags
+
+
 ## Light up each tile in `tiles` with a translucent overlay marker — the live
 ## movement-path preview. Reuses a pool of marker meshes (grown on demand, leftovers
 ## hidden) so dragging the mouse to preview routes is cheap. Empty list hides all.
-func show_path(tiles: Array) -> void:
+##
+## `legal_flags` (parallel to `tiles`, from `classify_path`) colours each tile: blue
+## where the move is allowed, red where it isn't. When omitted, every tile shows blue —
+## handy for callers that don't gate (none do today, but it keeps the API forgiving).
+func show_path(tiles: Array, legal_flags: Array = []) -> void:
 	# Grow the pool until there is a marker for every path tile.
 	while _path_markers.size() < tiles.size():
 		var marker := MeshInstance3D.new()
@@ -281,6 +414,9 @@ func show_path(tiles: Array) -> void:
 		var marker: MeshInstance3D = _path_markers[i]
 		if i < tiles.size():
 			marker.position = tile_to_world(tiles[i].x, tiles[i].y) + Vector3(0.0, 0.03, 0.0)
+			# Default to legal/blue; paint red where the legality flag says illegal.
+			var legal: bool = legal_flags[i] if i < legal_flags.size() else true
+			marker.material_override = _path_marker_material if legal else _path_illegal_material
 			marker.visible = true
 		else:
 			marker.visible = false
@@ -289,6 +425,114 @@ func show_path(tiles: Array) -> void:
 ## Hide the movement-path preview overlay.
 func clear_path() -> void:
 	for marker in _path_markers:
+		marker.visible = false
+
+
+## Draw the move-range OUTLINE: a bright border tracing the silhouette of the reachable
+## region. For every reachable tile we lay a thin strip along each side that faces a
+## NON-reachable tile (or the grid edge), so the interior stays clear and only "the shape
+## of where I can go" is drawn. `reachable` is the dict from `reachable_tiles` (its keys
+## are the reachable tiles). Reuses a grown-on-demand strip pool; pass an empty dict (or
+## call `clear_move_range`) to hide it.
+func show_move_range(reachable: Dictionary) -> void:
+	var seg := 0   # index of the next free strip in the pool
+	# As we lay the horizontal top lines we also record, per grid corner, the lowest and
+	# highest top-line that touches it. Where those differ, the outline changes height at
+	# that corner, so a thin vertical post is dropped there to keep the line continuous —
+	# this spans multi-level drops for free (every level's line touches the same corner).
+	# Corners are keyed in a DOUBLED integer lattice so tile centers (even) and corners
+	# (odd) both have integer keys; see `_edge_corner_keys`.
+	var corner_lo := {}
+	var corner_hi := {}
+	for tile in reachable:
+		var here: Vector2i = tile
+		var here_top := tile_height(here.x, here.y)
+		for dir in _ORTHO_DIRS:
+			if reachable.has(here + dir):
+				continue   # interior edge — neighbour is reachable too, no border here
+			# Top line: a horizontal sliver along this edge at the tile's surface height.
+			_place_range_top(_claim_range_marker(seg), here, dir, here_top)
+			seg += 1
+			# Register both endpoint corners of this edge at this tile's height.
+			for ckey in _edge_corner_keys(here, dir):
+				if corner_lo.has(ckey):
+					corner_lo[ckey] = minf(corner_lo[ckey], here_top)
+					corner_hi[ckey] = maxf(corner_hi[ckey], here_top)
+				else:
+					corner_lo[ckey] = here_top
+					corner_hi[ckey] = here_top
+	# Vertical posts wherever the outline steps between heights at a corner.
+	for ckey in corner_lo:
+		if corner_hi[ckey] - corner_lo[ckey] <= 0.001:
+			continue   # outline stays at one height here — nothing to bridge
+		_place_range_post(_claim_range_marker(seg), ckey, corner_lo[ckey], corner_hi[ckey])
+		seg += 1
+	# Hide any strips left over from a previous, larger outline.
+	for i in range(seg, _range_markers.size()):
+		_range_markers[i].visible = false
+
+
+## Grow the outline-strip pool until it has a strip at `index`, then return it. Same
+## grown-on-demand / hide-leftovers pooling as the path markers, factored out because a
+## single boundary edge can now spawn two strips (a top line and a cliff connector).
+func _claim_range_marker(index: int) -> MeshInstance3D:
+	while index >= _range_markers.size():
+		var m := MeshInstance3D.new()
+		m.mesh = _range_strip_mesh
+		m.material_override = _range_material
+		m.visible = false
+		add_child(m)
+		_range_markers.append(m)
+	return _range_markers[index]
+
+
+## Lay the horizontal top sliver along the `dir` edge of tile `here`, centered on the edge
+## line at the tile's surface `top` (lifted a hair to clear the cap). Thin across the edge,
+## full tile width along it; an X-facing edge runs along Z, a Z-facing edge along X.
+func _place_range_top(marker: MeshInstance3D, here: Vector2i, dir: Vector2i, top: float) -> void:
+	var center := tile_to_world(here.x, here.y)
+	marker.position = Vector3(
+		center.x + dir.x * tile_size * 0.5,
+		top + 0.05,
+		center.z + dir.y * tile_size * 0.5)
+	if dir.x != 0:
+		marker.scale = Vector3(_RANGE_BORDER_WIDTH, _RANGE_STRIP_THICKNESS, tile_size)
+	else:
+		marker.scale = Vector3(tile_size, _RANGE_STRIP_THICKNESS, _RANGE_BORDER_WIDTH)
+	marker.visible = true
+
+
+## The two endpoint corners of tile `here`'s `dir`-facing edge, as keys in the doubled
+## integer lattice (a tile center (x, z) is key (2x, 2z); its corners are the odd keys
+## one step away). The edge midpoint is the center plus `dir`; its two ends are that
+## midpoint plus/minus the perpendicular step. Shared corners get identical keys from
+## adjacent tiles, which is what lets the height-step detection in `show_move_range` work.
+func _edge_corner_keys(here: Vector2i, dir: Vector2i) -> Array:
+	var mid := Vector2i(here.x * 2, here.y * 2) + dir
+	var perp := Vector2i(dir.y, dir.x)   # rotate the step 90° to run along the edge
+	return [mid + perp, mid - perp]
+
+
+## Stand a thin vertical post at grid corner `ckey` (a doubled-lattice key), spanning Y
+## from `y_low` to `y_high`, to connect outline top-lines that meet there at different
+## heights. Thin in both X and Z so it reads as a corner of the line, not a wall/face.
+func _place_range_post(marker: MeshInstance3D, ckey: Vector2i, y_low: float, y_high: float) -> void:
+	# Halving the doubled key recovers the corner's (half-integer) grid index. We can't
+	# reuse `_grid_to_world_x/z` here: they take an `int`, which would TRUNCATE 12.5 to 12
+	# and park the post at a tile center. So apply the same centering formula in float.
+	var gx := ckey.x * 0.5
+	var gz := ckey.y * 0.5
+	marker.position = Vector3(
+		gx * tile_size - (grid_width - 1) * tile_size * 0.5,
+		(y_low + y_high) * 0.5,
+		gz * tile_size - (grid_height - 1) * tile_size * 0.5)
+	marker.scale = Vector3(_RANGE_BORDER_WIDTH, y_high - y_low, _RANGE_BORDER_WIDTH)
+	marker.visible = true
+
+
+## Hide the move-range outline overlay.
+func clear_move_range() -> void:
+	for marker in _range_markers:
 		marker.visible = false
 
 
