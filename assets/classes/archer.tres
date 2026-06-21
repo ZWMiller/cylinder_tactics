@@ -1,0 +1,32 @@
+; Archer class definition — a ClassDef data asset (see scripts/stats/ClassDef.gd).
+[gd_resource type="Resource" script_class="ClassDef" load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/stats/StatBlock.gd" id="1_sb"]
+[ext_resource type="Script" path="res://scripts/stats/ClassDef.gd" id="2_cd"]
+
+[sub_resource type="Resource" id="StatBlock_base"]
+script = ExtResource("1_sb")
+max_hp = 24
+max_mp = 4
+move = 5
+jump = 3
+speed = 7
+phys_atk = 6
+mag_atk = 2
+phys_def = 3
+mag_def = 3
+evasion = 5
+temporal_resist = 3
+
+[sub_resource type="Resource" id="StatBlock_growth"]
+script = ExtResource("1_sb")
+; Skirmisher growth: stays the fast, deadly mover. Unlisted fields = 0.
+phys_atk = 1
+speed = 1
+
+[resource]
+script = ExtResource("2_cd")
+class_id = 1
+display_name = "Archer"
+base = SubResource("StatBlock_base")
+growth = SubResource("StatBlock_growth")

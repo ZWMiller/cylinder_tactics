@@ -76,6 +76,45 @@ static func display_name(c: int) -> String:
 		_:             return "Unknown"
 
 
+# --- Stat layer bridge -------------------------------------------------------
+# The visual class enum above and the stat data assets in assets/classes/ are two
+# halves of "a class": this section joins them. The hat shape/color stays code (it's
+# cheap geometry); the *numbers* live in editable .tres so they can be tuned without
+# touching code (docs/DECISION_LOG.md).
+
+## Loaded class DEFINITIONS (base stats + per-level growth), one ClassDef per Class,
+## as `.tres` data assets. `preload` resolves them at PARSE time, so a missing or
+## renamed file is a loud editor error, not a silent runtime null. Keyed by the Class
+## enum (int), so `CLASS_DEFS[Class.MAGE]` is the mage's stat asset.
+const CLASS_DEFS := {
+	Class.SOLDIER: preload("res://assets/classes/soldier.tres"),
+	Class.ARCHER: preload("res://assets/classes/archer.tres"),
+	Class.MAGE: preload("res://assets/classes/mage.tres"),
+}
+
+
+## Return the ClassDef (stats + growth asset) for a class, or null if unmapped. The
+## single lookup the stat system goes through, so adding a class is "add a .tres + an
+## entry above," nothing else.
+static func class_def(c: int) -> ClassDef:
+	return CLASS_DEFS.get(c)
+
+
+## Sum the growth a unit has BANKED across its level-ups. `history` is the class held
+## at each past level-up (see `Unit.level_history`): one entry per level gained, in
+## whatever class the unit was at the time. This is the heart of the FFT-style "your
+## stats remember the jobs you leveled in" system — level early as a Mage and those
+## MP/MAG gains stay with you even after you switch to Soldier. Returns a fresh
+## (zeroed-then-summed) StatBlock; an empty history (a level-1 unit) yields all zeros.
+static func banked_growth(history: Array) -> StatBlock:
+	var banked := StatBlock.new()
+	for cid in history:
+		var cd := class_def(cid)
+		if cd != null and cd.growth != null:
+			banked = banked.combined(cd.growth)
+	return banked
+
+
 # --- Hat shape factories -----------------------------------------------------
 # One small builder per hat shape. Classes pick a shape in `new_hat_mesh`. All
 # three are sized from HAT_RADIUS / HAT_HEIGHT so they seat identically on the body.

@@ -37,6 +37,35 @@ enum Allegiance {
 ## system) updates this; `move_to` only handles the *visual* glide.
 var grid_coord: Vector2i = Vector2i.ZERO
 
+# --- Stats (class base + per-person aptitude + banked level-up growth) ---------
+# Effective max stats = current class base + banked growth + aptitude:
+#   - `unit_class` (above) selects the base profile (and appearance),
+#   - `recruit` carries the per-person aptitude + identity (null for legacy spawns),
+#   - `level_history` records the class held at each past level-up — the FFT-style
+#     bank that makes a unit's stats remember the jobs it leveled in.
+# See docs/GAME_DESIGN.md §3 and the stat scripts under scripts/stats/.
+
+## The person behind this unit (authored PC or rolled enemy): innate aptitude + name.
+## May be null for units spawned the old appearance-only way via `configure`.
+var recruit: Recruit = null
+
+## This unit's level. Level 1 = class base only; each `level_up` appends to history.
+@export var level: int = 1
+
+## Class held at each past level-up — one int per level gained (length == level − 1).
+## Summed into banked growth by `UnitClasses.banked_growth`; written by `level_up` /
+## seeded by `init_from_recruit`.
+var level_history: Array[int] = []
+
+## Computed effective MAX stats — the read-only result of `recompute_stats`. Don't
+## edit directly; change an input (class, level, aptitude) and recompute.
+var max_stats: StatBlock = null
+
+## Live, per-unit pools — the ONLY mutable stat state, kept off the shared templates
+## (the shared-by-reference gotcha in the class docstring).
+var current_hp: int = 0
+var current_mp: int = 0
+
 # --- Movement (visual glide between tiles) -----------------------------------
 
 ## Glide speed in world units per second. Constant speed (via `move_toward`) gives
@@ -63,6 +92,13 @@ var _is_moving: bool = false
 ## the current allegiance/class to the meshes and materials.
 func _ready() -> void:
 	_apply_appearance()
+	# Units spawned appearance-only (configure() with no recruit) still need valid
+	# stats, so derive a baseline from the class and fill the pools to full. A unit set
+	# up via init_from_recruit already has max_stats, so we don't clobber it here.
+	if max_stats == null:
+		recompute_stats()
+		current_hp = max_stats.max_hp
+		current_mp = max_stats.max_mp
 	# Idle until something calls `move_to`; no need to run `_process` every frame.
 	set_process(false)
 
@@ -124,6 +160,81 @@ func configure(side: Allegiance, klass: UnitClasses.Class) -> void:
 	unit_class = klass
 	if is_node_ready():
 		_apply_appearance()
+
+
+# --- Stats & class (the job system) ------------------------------------------
+
+## Set this unit up from a `Recruit` — the rich spawn path shared by authored PCs and
+## rolled enemies. Adopts the recruit's starting class + level, seeds the level history
+## as if it leveled the whole way in that class, computes max stats, and fills HP/MP to
+## full. After this the unit is combat-ready.
+func init_from_recruit(r: Recruit) -> void:
+	recruit = r
+	unit_class = r.starting_class
+	level = maxi(1, r.starting_level)
+	# A freshly spawned unit has no real per-level job history, so assume it leveled
+	# entirely in its starting class. (PCs usually start at level 1 → empty history.)
+	level_history.clear()
+	for _i in range(level - 1):
+		level_history.append(unit_class)
+	if is_node_ready():
+		_apply_appearance()
+	recompute_stats()
+	current_hp = max_stats.max_hp
+	current_mp = max_stats.max_mp
+
+
+## Recompute `max_stats` from current class base + banked level-up growth + aptitude,
+## then clamp the live pools so they never exceed the new maxes. Call after anything
+## that changes the inputs (reclass, level-up). Pure recompute — it does NOT heal.
+func recompute_stats() -> void:
+	var cd := UnitClasses.class_def(unit_class)
+	# Defensive: an unmapped class has no asset. Fall back to an empty block so the
+	# unit still functions (zeroed) instead of crashing on a null base.
+	var base: StatBlock = cd.base if cd != null and cd.base != null else StatBlock.new()
+	var banked := UnitClasses.banked_growth(level_history)
+	max_stats = base.combined(banked).combined(_aptitude()).clamped_nonneg()
+	current_hp = mini(current_hp, max_stats.max_hp)
+	current_mp = mini(current_mp, max_stats.max_mp)
+
+
+## Gain one level IN THE CURRENT CLASS: bank this class's growth and raise the live
+## pools by the max-stat increase (so a level-up actually heals you by the gain). This
+## is where the "level as a mage, keep the mage gains" history entry is written.
+func level_up() -> void:
+	level += 1
+	level_history.append(unit_class)
+	var prev_hp_max: int = max_stats.max_hp if max_stats != null else 0
+	var prev_mp_max: int = max_stats.max_mp if max_stats != null else 0
+	recompute_stats()
+	current_hp += maxi(0, max_stats.max_hp - prev_hp_max)
+	current_mp += maxi(0, max_stats.max_mp - prev_mp_max)
+
+
+## Reclass / job change: swap the class (base + appearance) while KEEPING this unit's
+## identity, level, banked history, and aptitude. The base changes immediately, but
+## growth banked under previous jobs persists — the core of the job system. Current
+## HP/MP are clamped down by `recompute_stats` if the new base is frailer.
+func set_class(klass: int) -> void:
+	unit_class = klass
+	if is_node_ready():
+		_apply_appearance()
+	recompute_stats()
+
+
+## The per-person aptitude offsets, or an empty (all-zero) block if this unit has no
+## recruit. Centralizes the null-guard so `recompute_stats` stays clean.
+func _aptitude() -> StatBlock:
+	if recruit != null and recruit.aptitude != null:
+		return recruit.aptitude
+	return StatBlock.new()
+
+
+## One-line stat summary for debug prints: who, class, level, and the effective block.
+func stats_summary() -> String:
+	var who: String = recruit.display_name if recruit != null else "(no recruit)"
+	var block: String = max_stats.describe() if max_stats != null else "(no stats)"
+	return "%s — L%d %s: %s" % [who, level, UnitClasses.display_name(unit_class), block]
 
 
 # --- Appearance --------------------------------------------------------------

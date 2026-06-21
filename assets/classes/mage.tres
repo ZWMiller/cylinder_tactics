@@ -1,0 +1,33 @@
+; Mage class definition — a ClassDef data asset (see scripts/stats/ClassDef.gd).
+[gd_resource type="Resource" script_class="ClassDef" load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/stats/StatBlock.gd" id="1_sb"]
+[ext_resource type="Script" path="res://scripts/stats/ClassDef.gd" id="2_cd"]
+
+[sub_resource type="Resource" id="StatBlock_base"]
+script = ExtResource("1_sb")
+max_hp = 18
+max_mp = 12
+move = 3
+jump = 2
+speed = 6
+phys_atk = 2
+mag_atk = 8
+phys_def = 2
+mag_def = 5
+evasion = 3
+temporal_resist = 4
+
+[sub_resource type="Resource" id="StatBlock_growth"]
+script = ExtResource("1_sb")
+; Caster growth: deeper mana + stronger magic. No HP growth — the mage stays a glass
+; cannon, so banking HP means leveling as a Soldier first. Unlisted fields = 0.
+max_mp = 1
+mag_atk = 1
+
+[resource]
+script = ExtResource("2_cd")
+class_id = 2
+display_name = "Mage"
+base = SubResource("StatBlock_base")
+growth = SubResource("StatBlock_growth")

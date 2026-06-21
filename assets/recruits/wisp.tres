@@ -1,0 +1,20 @@
+; Wisp — an authored PC recruit (see scripts/stats/Recruit.gd). Frail but clever and
+; quick-witted: a natural Mage/Archer, makes a flimsy Soldier.
+[gd_resource type="Resource" script_class="Recruit" load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/stats/StatBlock.gd" id="1_sb"]
+[ext_resource type="Script" path="res://scripts/stats/Recruit.gd" id="2_rc"]
+
+[sub_resource type="Resource" id="StatBlock_aptitude"]
+script = ExtResource("1_sb")
+max_hp = -2
+max_mp = 2
+mag_atk = 1
+evasion = 1
+
+[resource]
+script = ExtResource("2_rc")
+display_name = "Wisp"
+aptitude = SubResource("StatBlock_aptitude")
+starting_class = 2
+starting_level = 1

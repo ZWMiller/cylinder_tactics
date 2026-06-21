@@ -6,6 +6,95 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-21 — Stat system as Resources; FFT-style per-level-up job banking
+
+**Decision:** Implemented the stat layer as Godot **Resources** (`scripts/stats/`),
+not Dictionaries or hardcoded tables, with editable `.tres` data assets:
+- `StatBlock` (Resource) — the 11-number schema, reused for class *base*, per-level
+  *growth*, per-person *aptitude*, and accumulated *banked* growth. All ops
+  (`combined`/`scaled`/`clamped_nonneg`) return **new** instances (Resources are shared
+  by reference — the same gotcha as materials in `Unit.gd`).
+- `ClassDef` (Resource, one `.tres` per class in `assets/classes/`) — `base` + per-level
+  `growth`. Loaded via `UnitClasses.class_def()` (preloaded dict, enum→asset bridge).
+- `Recruit` (Resource) — the **person**: `display_name`, innate `aptitude`,
+  `starting_class`, `starting_level`. Authored PCs are `.tres` in `assets/recruits/`;
+  enemies are minted at spawn by `StatRoll.random_recruit(class, level, rng)`. Both
+  feed the identical pipeline ("shared blocks").
+- `Unit` gained: `level`, `level_history`, computed `max_stats`, live `current_hp/mp`,
+  and methods `init_from_recruit` / `recompute_stats` / `level_up` / `set_class`.
+
+**Effective stats = `current_class.base` + `banked_growth` + `aptitude`** (then floored
+at 0). The defining choice is **path-dependent job banking (FFT-style):** `level_history`
+records *which class the unit held at each level-up*; `banked_growth` sums that class's
+growth per entry. Leveling as a Mage then reclassing to Soldier **keeps** the mage's
+banked MP/MATK — so players *craft* characters through their leveling path. `set_class`
+swaps the base immediately but preserves history, identity, level, and aptitude.
+
+We store the **history of classes-per-level and recompute from the current tables**
+(rather than snapshotting the numbers gained). Chosen so growth/`.tres` stays *tunable* —
+retune a table and every existing unit updates, instead of being frozen with stale gains.
+
+**Growth includes real combat stats** (Soldier `+1 HP/+1 PATK`, Archer `+1 PATK/+1 SPD`,
+Mage `+1 MP/+1 MATK`), so a single un-promoted class is a viable build — leveling in-class
+is genuinely worthwhile, and promotions (deferred, see below) are a *bonus* path, not the
+only way to grow. Numbers stay tiny per the small-numbers philosophy.
+
+**Promotions/job tree kept OUT of `ClassDef`:** which class unlocks which, at what level,
+is a separate progression graph (prerequisites, multiple unlocks) and will get its own
+resource later. `ClassDef` is a thin stat asset only.
+
+**Why Resources/.tres:** they're the idiomatic Godot data asset — Inspector-editable,
+serializable, hot-swappable — and a learning goal for the owner. Verified end-to-end
+headless (assets load; banking math correct; full project parses clean).
+
+**Rejected:** Dictionary/hardcoded stat tables (no Inspector, not the Godot idiom);
+snapshotting per-level gains (freezes numbers against retuning); growth that's HP/MP-only
+with combat power gated behind promotions (would make base classes feel like traps);
+folding the promotion tree into `ClassDef` (bloats the stat asset, fights SRP).
+
+---
+
+## 2026-06-21 — Stat-block schema + small-numbers design philosophy
+
+**Decision:** Locked the unit stat schema (full detail in `docs/GAME_DESIGN.md` §3),
+to live in `scripts/UnitClasses.gd` as class base templates + per-unit overrides:
+- **Live now/soon:** `max_hp`, `max_mp`, `move`, `jump`, `speed`, `phys_atk`,
+  `mag_atk`, `phys_def`, `mag_def`.
+- **Reserved (field now, effects later):** `evasion` (hidden hit-chance input) and
+  `temporal_resist` (save vs. hostile time magic + fall-damage mitigation — the
+  game's signature stat).
+- **Deferred (not in schema):** crit, luck, FFT Brave/Faith.
+
+Two model choices baked in: **(a)** offense and defense are **split** into physical
+and magical (`phys_atk`/`mag_atk`, `phys_def`/`mag_def`), Fire-Emblem-style, so class
+identity is mechanical, not cosmetic; **(b)** avoidance and toughness are **separate
+axes** — a hit% check (accuracy vs. `evasion`) decides *whether* a hit lands, and
+defense reduces *how much* — explicitly **not** a D&D single-roll Armor Class that
+fuses the two. Combat ships **deterministic first** (always hit; `damage = atk − def`
+floored at 1); the evasion dice come later.
+
+**Small-numbers philosophy (committed):** All stats and damage stay in the
+single-/low-double-digit range — ~30 HP, ~6-damage hits, ~1 per point of defense. We
+reject JRPG number inflation (5-digit hits vs. 4-digit defense) because at that scale
+a single point is meaningless. Small numbers make every point a legible tradeoff
+(+1 jump, 6 vs 5 damage, a 1-point resist all matter at a glance). This bounds the
+whole economy and constrains damage formulas to subtractive/bounded, never a
+percentage curve that explodes at high values.
+
+**Why:** Settling the *set* of stats before writing the table avoids a painful
+refactor once movement, combat, gear, and spells all read from it; the split-stat +
+separate-hit/mitigation model is the genre consensus (FE, Tactics Ogre, Triangle
+Strategy) and reads cleanly on a grid. The small-numbers rule is an owner design
+preference logged here so every later formula respects it.
+
+**Rejected:** D&D Armor Class (one roll for hit-or-nothing, full damage on hit) —
+swingy and fuses avoidance with toughness, less readable on a grid; FFT Brave/Faith
+and a Luck/crit stat now — each a whole subsystem, and the committed set already gives
+enough spell-design surface; large/inflating number ranges — break the legibility the
+owner wants.
+
+---
+
 ## 2026-06-19 — Per-turn action menu (Move / End Turn); input gated by phase
 
 **Decision:** A unit's turn runs through a small state machine in `Main` with a

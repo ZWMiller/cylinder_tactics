@@ -59,18 +59,85 @@ A **class** defines the *shape* of a unit:
 individual** but are **derived from / bounded by their class** (two soldiers differ,
 but both read as soldiers).
 
-Likely stats (not final — placeholders to reason about, not a committed schema):
-- HP, and possibly a magic/resource pool (MP) for mages and the time-mage.
-- Attack power, defense; possibly separate magic attack / magic defense.
-- Move (tiles per turn) and jump (how much Z-height a unit can climb/descend).
-- Speed / initiative (feeds turn order — see §6).
+### Small-numbers design philosophy (committed)
+
+**Keep every number small and human-intuitable.** Stats and damage live in roughly
+the **single- to low-double-digit** range — a unit has ~30 HP, a solid hit does ~6,
+a point of defense shaves ~1. We deliberately reject the JRPG inflation curve where
+hits read "12,480" against "2,500 defense": at that scale a single point is
+meaningless and the player can't feel a tradeoff. Small numbers make every stat
+point *matter* — a +1 jump, a 6-damage vs 5-damage hit, a 1-point resist are all
+decisions the player can reason about at a glance. This bounds the whole economy:
+HP, attack, defense, and damage formulas are all designed to stay legible, not to
+grow without limit.
+
+### Committed stat schema
+
+Decided 2026-06-21 (see `docs/DECISION_LOG.md`). Three tiers by how "live" each stat
+is — the *set* is fixed, but reserved stats may sit at a default until their system
+ships. The genre model we follow is **Fire Emblem-style split offense/defense + a
+derived hit chance** (not a D&D single-roll Armor Class): avoidance and toughness are
+*separate axes* — hit% decides *whether* you connect, defense reduces *how much*.
+
+**Live now / very soon** (have gameplay effects in the near-term roadmap):
+- `max_hp` — health pool.
+- `max_mp` — resource for abilities/spells (mages + time-mage; can be 0 for a soldier).
+- `move` — tiles reachable per turn.
+- `jump` — Z-height a unit can climb/descend in one step (the next gate to ship).
+- `speed` — turn order / initiative (see §6).
+- `phys_atk` — scales physical damage.
+- `mag_atk` — scales magical damage.
+- `phys_def` — mitigates physical damage.
+- `mag_def` — mitigates magical damage (magic resist).
+
+**Reserved** (field exists now with a sane default; effects land later):
+- `evasion` — feeds a *hidden* hit-chance check (hit% = f(attacker accuracy, target
+  evasion), shown to the player only as a resulting %). Combat ships **deterministic
+  first** (always hit; `damage = atk − def`, floored at 1); the dice come later, but
+  the field exists so the formula has a home.
+- `temporal_resist` — this game's signature stat, since the whole design is built on
+  the time shift. Dual purpose: (1) a save vs. **hostile time magic** (an enemy
+  time-mage targeting this unit — §5), and (2) **fall-damage mitigation** from the
+  environmental shift (§4). Reserved now; the fall-damage hook arrives with the shift
+  re-settle work, ahead of any time powers.
+
+**Deferred** (intentionally *not* in the schema yet — noted so they have an obvious
+slot): crit chance, luck, and FFT-style Brave/Faith. The split offense/defense +
+evasion set already gives ample spell-design surface (debuff defense, lower evasion,
+magic that pierces resist); add these only if a concrete need appears.
 
 **Design guidance:**
-- A unit's stat block should be **data**, not hardcoded per scene — consistent with
-  the project's code-driven, generate-from-data workflow. A class is effectively a
-  template; an individual is a class template plus per-unit overrides.
-- Fall damage from the time shift (§4) should read from stats so it can scale or be
-  resisted later, rather than being a hardcoded global constant.
+- A unit's stat block is **data**, not hardcoded per scene — consistent with the
+  project's code-driven workflow. A class is a **base template**; an individual is a
+  class template **plus per-unit overrides**. (How to *store* this — a custom
+  `Resource` vs. a plain Dictionary — is the next decision; not yet locked.)
+- Fall damage from the time shift (§4) reads from stats (`temporal_resist`, and drop
+  distance), so it can scale or be resisted — never a hardcoded global constant.
+- Damage formulas must respect the small-numbers philosophy above: keep mitigation
+  subtractive and bounded, not a percentage curve that explodes at high values.
+
+### Leveling & the job system (built 2026-06-21)
+
+The stat layer lives in `scripts/stats/` as Godot **Resources**, with editable `.tres`
+data assets (see `docs/STATS.md` for the full write-up and `docs/DECISION_LOG.md` for
+rationale):
+- `StatBlock` — the number schema, reused for base / growth / aptitude / banked totals.
+- `ClassDef` (`assets/classes/*.tres`) — a class's `base` + per-level `growth`.
+- `Recruit` (`assets/recruits/*.tres` for PCs; rolled by `StatRoll` for enemies) — the
+  **person**: name + innate aptitude, decoupled from the job.
+
+**Effective stats = class base + banked growth + aptitude.** Leveling is **path-dependent
+(FFT-style):** a unit records the class it held at each level-up and permanently *banks*
+that class's growth. Reclassing swaps the base but keeps the banked history — so leveling
+as a Mage and later switching to Soldier carries the mage's MP/MAG gains along. This is
+the intended **job system**: players *craft* a character through the sequence of jobs they
+level in. (This resolves §2's "fixed vs. job-change" lean toward **job-change with
+persistent per-level banking**.)
+
+**Growth includes combat stats**, deliberately, so an un-promoted class is a viable build
+on its own; promotions are a bonus, not a requirement. The **promotion / job-upgrade tree**
+(which class unlocks which, at what level) is a *separate* future resource — kept out of
+`ClassDef`, which stays a thin stat asset.
 
 **Open question:** Resource model for abilities — MP pool, per-ability cooldowns,
 charge/turn economy, or some mix? Especially relevant for time-mage powers (§5).

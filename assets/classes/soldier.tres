@@ -1,0 +1,36 @@
+; Soldier class definition — a ClassDef data asset (see scripts/stats/ClassDef.gd).
+; Edit these numbers in the Godot Inspector or right here; they are the single source
+; of truth for soldier stats. The two embedded sub-resources are StatBlocks: `base`
+; (level-1 numbers) and `growth` (what each level-up in this class banks).
+[gd_resource type="Resource" script_class="ClassDef" load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/stats/StatBlock.gd" id="1_sb"]
+[ext_resource type="Script" path="res://scripts/stats/ClassDef.gd" id="2_cd"]
+
+[sub_resource type="Resource" id="StatBlock_base"]
+script = ExtResource("1_sb")
+max_hp = 32
+max_mp = 0
+move = 4
+jump = 2
+speed = 5
+phys_atk = 7
+mag_atk = 1
+phys_def = 5
+mag_def = 2
+evasion = 2
+temporal_resist = 3
+
+[sub_resource type="Resource" id="StatBlock_growth"]
+script = ExtResource("1_sb")
+; Bruiser growth: tougher AND hits harder, so a pure Soldier is a viable build.
+; Unlisted fields = 0 (no growth).
+max_hp = 1
+phys_atk = 1
+
+[resource]
+script = ExtResource("2_cd")
+class_id = 0
+display_name = "Soldier"
+base = SubResource("StatBlock_base")
+growth = SubResource("StatBlock_growth")

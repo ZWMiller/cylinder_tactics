@@ -1,0 +1,20 @@
+; Dart — an authored PC recruit (see scripts/stats/Recruit.gd). Light-footed and
+; evasive: the textbook Archer; gives up a little armor for it.
+[gd_resource type="Resource" script_class="Recruit" load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/stats/StatBlock.gd" id="1_sb"]
+[ext_resource type="Script" path="res://scripts/stats/Recruit.gd" id="2_rc"]
+
+[sub_resource type="Resource" id="StatBlock_aptitude"]
+script = ExtResource("1_sb")
+move = 1
+speed = 1
+evasion = 1
+phys_def = -1
+
+[resource]
+script = ExtResource("2_rc")
+display_name = "Dart"
+aptitude = SubResource("StatBlock_aptitude")
+starting_class = 1
+starting_level = 1

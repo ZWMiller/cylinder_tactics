@@ -32,19 +32,37 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       with Move / End Turn; Up/Down highlight, Enter activates. Input is gated by a
       `Phase` enum in `Main` (MENU vs MOVE): movement only works after choosing Move;
       End Turn cycles the active unit. See DECISION_LOG.
+- [x] Class-driven stat blocks + job system — Resources in `scripts/stats/`
+      (`StatBlock`/`ClassDef`/`Recruit`/`StatRoll`) + `.tres` data in `assets/classes/`
+      and `assets/recruits/`. Effective = class base + banked level-up growth + aptitude;
+      FFT-style per-level-up job banking (`Unit.level_history`); authored PCs vs rolled
+      enemies. Reserved `evasion`/`temporal_resist` fields. See `docs/STATS.md`.
 
 ## Next
-- [ ] **Jump-height gate** — the hook is ready: reject a move when any
-      `Battlefield.path_step_heights(path)` step exceeds the unit's jump stat (needs the
-      stat block below). Tint the preview red / refuse the commit when illegal.
+
+### Do first — make the new stat system visible/usable, then verify
+- [ ] **Wire `Main.gd` to spawn leveled, classed characters.** Demo units are still
+      spawned via `configure(side, class)` (appearance-only, baseline level-1 stats).
+      Spawn PCs from authored `Recruit.tres` via `Unit.init_from_recruit`, and enemies via
+      `StatRoll.random_recruit(class, level, rng)`, so units carry real classes, levels,
+      and stat blocks. Everything below depends on this.
+- [ ] **Action menu: show the active character's name**, and add a **"Stats" option** that
+      displays the unit's full stat block (for now even a print / simple panel is fine) so
+      the owner can verify class/level/aptitude/banked-growth in-game before moving on.
+      `Unit.stats_summary()` already returns a one-line summary to start from.
+
+### Then
+- [ ] **Jump-height gate** — NOW UNBLOCKED (units have a real `jump` stat in `max_stats`).
+      Reject a move when any `Battlefield.path_step_heights(path)` step exceeds the active
+      unit's `max_stats.jump`. Tint the preview red / refuse the commit when illegal.
 - [ ] Movement range limit — clicks currently move the active unit *anywhere*; gate by
-      grid distance + Z cost (Battlefield helpers are the place for reachability)
-- [ ] Class-driven stat blocks — `UnitClasses.gd` is the intended home (GAME_DESIGN §2–3);
-      feeds movement range (move/jump) and turn order (speed)
-- [ ] Turn order / turn-based loop — will *set* `_active_unit` from speed/initiative,
+      grid distance + Z cost against `max_stats.move` (Battlefield helpers own reachability)
+- [ ] Turn order / turn-based loop — will *set* `_active_unit` from `max_stats.speed`,
       replacing the temporary Tab cycle
-- [ ] Re-settle units + apply fall damage inside `advance_shift()` (currently terrain-only;
-      units don't move when the map shifts yet) — occupancy map now exists in `Main`
+- [ ] Re-settle units + apply fall damage inside `advance_shift()` (terrain-only today) —
+      fall damage should read `max_stats.temporal_resist` (the reserved hook), not a global
+- [ ] Promotion / job-upgrade tree — a separate resource (which class unlocks which, at
+      what level); deliberately kept out of `ClassDef`. See `docs/STATS.md`.
 
 ## Polish / nice-to-have
 - [ ] Distinguish committed-waypoint tiles from the hover tail in the path preview

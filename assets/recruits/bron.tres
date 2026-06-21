@@ -1,0 +1,21 @@
+; Bron — an authored PC recruit (see scripts/stats/Recruit.gd). Brawny and a touch
+; slow: a natural Soldier, a poor Mage. The embedded StatBlock is his innate aptitude
+; (offsets added on top of whatever class he holds; they persist across reclassing).
+[gd_resource type="Resource" script_class="Recruit" load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/stats/StatBlock.gd" id="1_sb"]
+[ext_resource type="Script" path="res://scripts/stats/Recruit.gd" id="2_rc"]
+
+[sub_resource type="Resource" id="StatBlock_aptitude"]
+script = ExtResource("1_sb")
+max_hp = 3
+phys_atk = 1
+mag_atk = -1
+speed = -1
+
+[resource]
+script = ExtResource("2_rc")
+display_name = "Bron"
+aptitude = SubResource("StatBlock_aptitude")
+starting_class = 0
+starting_level = 1
