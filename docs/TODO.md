@@ -59,6 +59,14 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       and the same classifier gates the commit (any red tile refuses the move). Range drawn
       as an **outline** (border strips on edges facing outside the region), not a fill. See
       `docs/DECISION_LOG.md`.
+- [x] Camera polish + turn-counted map shift — `CameraController` follows the active unit's
+      live position (gentle trailing lag) and plays a one-time battle intro (open 90° off-axis,
+      slow orbit in, hold, punch-in on the first unit). The map time-shift is now driven by the
+      turn count: `TurnManager` counts completed character turns (NOT CT) and every Nth
+      (`register_map_transition_speed`, default 10) fires `map_transition_due` + pauses the turn
+      loop; `Main` plays a cinematic (zoom out to whole map → hold → shift → hold → zoom back in)
+      then resumes via `continue_after_transition`. New `ShiftCounter` HUD (top-right "Shift in:
+      N") telegraphs the countdown. Debug **T** key previews the cinematic. See `docs/DECISION_LOG.md`.
 
 ## Next
 
@@ -97,10 +105,11 @@ without the announcer knowing them. Reusable pieces already exist (`Battlefield`
 `ActionMenu`/`StatPanel`/`StatusPanel`, the stat resources); these extractions carve the
 rest out of `Main`, roughly in order:
 
-- [ ] **`TurnManager` (do first, with Turn order)** — owns `_active_unit`, `_player_units`,
-      and (new) the speed-based turn queue; replaces `_cycle_active_unit` + the Tab cycle.
-      Emits `active_unit_changed(unit)` / `turn_ended(unit)`. Listeners (HUD title, status
-      box, active-tile marker) react to the signal instead of `Main` hard-wiring them.
+- [x] **`TurnManager`** — owns `_active_unit` + the CT (speed) turn queue; replaced
+      `_cycle_active_unit`/`_player_units`. Emits `active_unit_changed(unit)` / `turn_ended(unit)`
+      (+ `map_transition_due` / `map_transition_countdown`). `Main._on_active_unit_changed`
+      reacts (title, status, marker, player/enemy branch) instead of `Main` hard-wiring them.
+      First extraction landed — the rest below remain.
 - [ ] **`Encounter` resource** — the per-battle *data*: map `states` (or a map generator
       ref) + the roster (PC recruits + enemy class/level rows) + RNG seed. This is what
       makes `Battle.tscn` reusable: swap the resource, get a different fight.
@@ -117,8 +126,8 @@ rest out of `Main`, roughly in order:
       `Encounter`. `Main` shrinks to a launcher (pick an encounter → load `Battle.tscn`),
       or disappears in favor of a menu/level-select scene.
 
-Decision to log when the first extraction lands: the move to **node composition + signals**
-as the battle architecture (and what each node owns / which signals exist).
+The move to **node composition + signals** as the battle architecture landed with the
+`TurnManager` extraction — logged in `docs/DECISION_LOG.md` (2026-06-21).
 
 ## Polish / nice-to-have
 - [ ] Distinguish committed-waypoint tiles from the hover tail in the path preview
@@ -132,8 +141,12 @@ as the battle architecture (and what each node owns / which signals exist).
 - [ ] Multiple grid sizes
 - [ ] Basic combat (attack range, damage)
 - [ ] Character classes (soldier/archer/mage) + class-driven stat blocks — see `docs/GAME_DESIGN.md` §2–3
-- [ ] Time-degradation map shift every N turns (tiles drop, units fall + take damage) — see `docs/GAME_DESIGN.md` §4
-- [ ] Shift telegraph + hold-to-preview "what-if" view — see `docs/GAME_DESIGN.md` §4
+- [~] Time-degradation map shift every N turns — *trigger + cadence + cinematic done*
+      (turn-counted in `TurnManager`, cinematic in `Main`); **still TODO: units fall + take
+      damage** on the shift (see the "Re-settle units + apply fall damage" item above). §4
+- [~] Shift telegraph + hold-to-preview "what-if" view — *basic telegraph done* (the
+      `ShiftCounter` countdown); **still TODO: the hold-to-preview "what-if" terrain view**
+      (`Battlefield.peek_next_state` already exposes the data). See `docs/GAME_DESIGN.md` §4
 - [ ] Time-mage powers (accelerate shift, shift one tile early, …) — deferred, see `docs/GAME_DESIGN.md` §5
 
 See `docs/GAME_DESIGN.md` for the full game-design vision and the structural choices

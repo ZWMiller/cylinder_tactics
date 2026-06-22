@@ -244,13 +244,17 @@ func _process(delta: float) -> void:
 		_position_stat_panel(unit)
 
 
-## Godot's earliest input hook — runs before any node's `_unhandled_input`. We handle
-## menu navigation here (not in `_unhandled_input`) so that consuming the confirm key
-## reliably beats the Battlefield's placeholder Space/Enter time-shift: because the
-## Battlefield is a *child*, it would otherwise receive `_unhandled_input` first.
-## We only touch the menu keys during MENU phase and consume just those, leaving all
-## other input (mouse, camera) to flow normally.
+## Godot's earliest input hook — runs before any node's `_unhandled_input`. We handle menu
+## navigation here so consuming the confirm key happens before children see it. We only touch
+## the menu keys during MENU phase and consume just those, leaving other input (mouse, camera)
+## to flow normally. The debug time-shift key is handled up front so it works in any phase.
 func _input(event: InputEvent) -> void:
+	# Debug: T manually plays the map-shift cinematic to preview the terrain cycle. Handled
+	# before the menu gate so it works regardless of phase; `_debug_request_shift` guards it.
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_T:
+		_debug_request_shift()
+		get_viewport().set_input_as_handled()
+		return
 	if not _is_player_turn() or _phase != Phase.MENU:
 		return
 	if event.is_action_pressed("ui_up"):
@@ -666,6 +670,19 @@ func _play_map_transition() -> void:
 ## Update the top-right countdown box when the turn manager reports turns-until-shift.
 func _on_shift_countdown(turns_remaining: int) -> void:
 	_shift_counter.set_count(turns_remaining)
+
+
+## Debug helper (T key): play the map-transition cinematic on demand to preview the terrain
+## cycle, instead of waiting out the turn cadence. Allowed only from a player's turn (so it
+## can't collide with an enemy's AI turn or a transition already in flight — `_is_player_turn`
+## is false in both cases), and restores the player's menu afterward since the cinematic hides
+## it. Deliberately does NOT touch the turn counter: it's a preview, so the scheduled shift
+## cadence is unaffected (the terrain state does advance, same as the old Space shortcut did).
+func _debug_request_shift() -> void:
+	if not _is_player_turn():
+		return
+	await _play_map_transition()
+	_start_turn()
 
 
 ## Place/recolor the active-unit tile marker on the active unit's tile, and aim the camera at

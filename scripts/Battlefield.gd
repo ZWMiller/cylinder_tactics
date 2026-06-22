@@ -198,15 +198,6 @@ func _ready() -> void:
 	render_state(_current_index)
 
 
-## Godot input hook for events nothing else consumed. Pressing the "accept"
-## action (Space / Enter by default) advances the time-shift, so you can watch
-## the map cycle through its states. This is placeholder driving for the
-## prototype; the real shift will be tied to the turn counter later.
-func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("ui_accept"):
-		advance_shift()
-
-
 # --- Public shift API (see docs/GAME_DESIGN.md §4 / DECISION_LOG) -------------
 # Kept deliberately small and public so the preview feature and the time-mage's
 # powers can later peek at / nudge the shift without reaching into internals.

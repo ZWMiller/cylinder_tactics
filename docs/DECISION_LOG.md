@@ -6,6 +6,58 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-21 — Turn-counted map shift (cinematic that pauses the turn loop) + camera intro/follow
+
+**Decision:** Drove the map time-shift off the *turn count* and made it a coordinated camera
+cinematic, plus a cinematic battle intro and an active-unit camera follow.
+
+- **Shift cadence is turn-counted, not CT.** `TurnManager` counts *completed character turns*
+  and every Nth (`register_map_transition_speed`, default `DEFAULT_MAP_TRANSITION_SPEED` = 10;
+  ≤ 0 disables) fires `map_transition_due`. Deliberately independent of Charge Time — the shift
+  is steady wall-clock-ish pressure on the battle, not tied to how fast anyone charges. Counted
+  in `end_turn` between the ending turn and choosing the next actor, so the map takes its slot
+  "between" characters.
+- **The shift pauses the turn loop.** Because the transition is a cinematic that must play
+  uninterrupted, `end_turn` does **not** pick the next actor when a shift is due — it emits
+  `map_transition_due` and returns. `Main` plays the cinematic, then calls
+  `TurnManager.continue_after_transition()` to resume. This is the key sequencing decision: no
+  unit acts underneath the cinematic. (Rejected: letting `end_turn` advance and run the shift
+  concurrently — the next unit would move during the transition.)
+- **The cinematic** (`Main._play_map_transition`, async/`await`): register the current zoom →
+  recenter + zoom out to the camera's captured `home_ortho_size` (whole-map framing) → hold 1s →
+  `Battlefield.advance_shift()` → hold 1s → release the camera + zoom back to the registered
+  level as the follow re-centers on the active unit. `_map_transition_playing` gates player input
+  (folded into `_is_player_turn`) and suspends the per-frame camera follow for the duration.
+- **`ShiftCounter` HUD** — a top-right "Shift in: N" box (same CanvasLayer-view recipe as
+  `StatusPanel`), driven by `TurnManager.map_transition_countdown`; hits 0 on the shift turn,
+  resets after. This is the first cut of the §4 shift *telegraph*.
+- **Camera follow tracks the unit's *live* position, not the destination tile** — pointing it
+  at `grid_coord` (set to the destination the instant a move commits) made it jump ahead and
+  wait; following `global_position` pans at walking pace. `follow_speed` (4.0) sets the steady
+  trailing lag (~`MOVE_SPEED / follow_speed` ≈ 1.5 tiles).
+- **One-time battle intro** (`CameraController.play_intro_orbit` + `Main._ready`): open
+  `intro_orbit_degrees` (90°) off-azimuth (a neighbouring corner), ease into the authored yaw
+  over `intro_orbit_time`, hold `INTRO_HOLD`, then `begin()` the loop; the first-ever active unit
+  triggers a `zoom_in_steps` punch-in (`INTRO_ZOOM_CLICKS`). Only the first activation auto-zooms;
+  the player owns zoom after. All driven through the rig's existing yaw/target/`ortho_size` (no
+  hand-written transforms — the original black-screen lesson).
+- **Debug shift moved to `Main`, key `T`, routed through the cinematic.** Removed the placeholder
+  `Battlefield._unhandled_input` Space/Enter instant-shift (Space now belongs to menu-confirm).
+  `T` previews the cinematic from a player's turn only (so it can't collide with an enemy turn or
+  an in-flight transition) and restores the menu after; it does **not** touch the turn counter
+  (preview, not a scheduled shift).
+
+**Why:** The §4 map shift needed a real trigger (turn cadence) and to read as "a thing," not an
+instant terrain swap — hence the establishing zoom-out/hold/shift/hold/zoom-in. Keeping the
+*cadence* (turn counting + signals) in `TurnManager` and the *mechanics* (terrain) on
+`Battlefield`, with `Main` choreographing, follows the node-composition + signals architecture.
+
+**Rejected:** CT-based shift timing (wanted cadence independent of speed); concurrent
+shift/turn (cinematic would fight a moving unit); keeping the instant Space debug shift (bypassed
+the cinematic and clashed with menu-confirm).
+
+---
+
 ## 2026-06-21 — Turn order: `TurnManager` node (FFT Charge-Time) + signal-driven hand-off; enemies act through the player's own move functions
 
 **Decision:** Carved whose-turn-it-is out of `Main` into a new `TurnManager` node — the first
