@@ -29,10 +29,10 @@ const RECRUIT_BRON := preload("res://assets/recruits/bron.tres")  # Soldier
 const RECRUIT_DART := preload("res://assets/recruits/dart.tres")  # Archer
 const RECRUIT_WISP := preload("res://assets/recruits/wisp.tres")  # Mage
 
-## The actions offered at the start of a turn, in menu order. "Stats" inspects the
-## active unit (prints its block + pins the floating panel) so the new stat system is
-## verifiable in-game.
-const MENU_OPTIONS := ["Move", "Stats", "End Turn"]
+## The actions offered at the start of a turn, in menu order. "Attack" enters the targeting
+## phase (orange reach overlay; click an enemy in range to strike). "Stats" inspects the
+## active unit (prints its block + pins the floating panel) so the stat system is verifiable.
+const MENU_OPTIONS := ["Move", "Attack", "Stats", "End Turn"]
 
 ## How long (seconds) the cursor must rest on a unit before its stat panel pops up.
 const HOVER_DELAY := 1.0
@@ -58,8 +58,14 @@ const INTRO_ZOOM_CLICKS := 4
 const MAP_TRANSITION_HOLD := 1.0
 const MAP_ZOOM_TIME := 1.0
 
-## The two input phases of a turn: choosing an action, or placing a move.
-enum Phase { MENU, MOVE }
+## How far above a struck unit's origin the floating damage number spawns, in world units.
+const DAMAGE_NUMBER_HEIGHT := 1.8
+
+## Color of the floating damage number (a soft red so it reads as "ouch" against the terrain).
+const DAMAGE_NUMBER_COLOR := Color(1.0, 0.5, 0.45)
+
+## The input phases of a turn: choosing an action, placing a move, or aiming an attack.
+enum Phase { MENU, MOVE, ATTACK }
 
 ## Authored player units: [grid_x, grid_z, Recruit]. Each spawns via
 ## `Unit.init_from_recruit`, so it carries a real class, level, aptitude and stat
@@ -146,6 +152,16 @@ var _hovered_tile: Vector2i = Battlefield.INVALID_TILE
 var _reachable: Dictionary = {}
 var _move_solid: Dictionary = {}
 var _move_occupied: Dictionary = {}
+
+## The attack being aimed during the ATTACK phase (the active unit's `physical_attack` for now),
+## and the set of tiles it can reach `{ Vector2i: true }` — snapshotted when the phase opens so
+## the click handler can validate a target in O(1). Both stale outside the ATTACK phase.
+var _attack_profile: Attack = null
+var _attack_tiles: Dictionary = {}
+
+## True while an attack is resolving (its animation + damage + any death are playing out). Gates
+## player input via `_is_player_turn` so clicks don't queue a second attack mid-swing.
+var _resolving_action: bool = false
 
 ## Floating HUD box that shows a unit's stat block above its head. One reusable view,
 ## repositioned/retexted per target; hidden when nothing is being inspected.
@@ -268,12 +284,16 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
-## Godot input hook for events nothing else consumed. Only the MOVE phase reacts here
+## Godot input hook for events nothing else consumed. The MOVE and ATTACK phases react here
 ## (menu keys are handled earlier in `_input`); in MENU phase tile clicks do nothing.
 func _unhandled_input(event: InputEvent) -> void:
-	if not _is_player_turn() or _phase != Phase.MOVE:
+	if not _is_player_turn():
 		return
-	_move_input(event)
+	match _phase:
+		Phase.MOVE:
+			_move_input(event)
+		Phase.ATTACK:
+			_attack_input(event)
 
 
 # --- Menu phase --------------------------------------------------------------
@@ -292,6 +312,8 @@ func _activate_menu_option() -> void:
 	match MENU_OPTIONS[_menu_index]:
 		"Move":
 			_enter_move_phase()
+		"Attack":
+			_enter_attack_phase()
 		"Stats":
 			_inspect_active_unit()
 		"End Turn":
@@ -432,6 +454,99 @@ func _perform_move(tile_path: Array) -> void:
 	_active_unit.move_along(_battlefield.path_to_world_points(tile_path))
 
 
+# --- Attack phase ------------------------------------------------------------
+
+## Switch from the menu into aiming an attack: hide the menu, snapshot the active unit's basic
+## attack + its reachable tiles, and fill those tiles orange. Clicking an enemy in range then
+## commits (see `_attack_input`); Escape returns to the menu. Mirrors `_enter_move_phase`, but
+## the overlay is a *fill* of "where I can hit" rather than the move-range outline.
+func _enter_attack_phase() -> void:
+	_phase = Phase.ATTACK
+	_menu.set_menu_visible(false)
+	_status_panel.hide_panel()
+	_unpin_stats()
+	_clear_plan()   # drop any move overlays before drawing the attack reach
+
+	_attack_profile = _active_unit.physical_attack()
+	var tiles := _battlefield.tiles_in_range(
+		_active_unit.grid_coord, _attack_profile.min_range, _attack_profile.max_range)
+	# Index the tiles for O(1) target validation on click.
+	_attack_tiles = {}
+	for t in tiles:
+		_attack_tiles[t] = true
+	_battlefield.show_attack_range(tiles)
+
+
+## Attack-phase input: left-click an in-range enemy to strike; Escape backs out to the menu.
+func _attack_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		_try_attack(event.position)
+	elif event.is_action_pressed("ui_cancel"):  # Escape: cancel back to the menu
+		_start_turn()
+
+
+## Validate a click during the attack phase and, if it lands on an enemy inside the reach,
+## commit the attack. Clicks outside the range, on empty tiles, on the attacker, or on an ally
+## do nothing (you can only strike an enemy in range).
+func _try_attack(screen_point: Vector2) -> void:
+	var tile := _battlefield.tile_at_screen_point(_camera, screen_point)
+	if tile == Battlefield.INVALID_TILE or not _attack_tiles.has(tile):
+		return
+	var target: Unit = _units_by_tile.get(tile)
+	if target == null or target == _active_unit or target.allegiance == _active_unit.allegiance:
+		return
+	_commit_attack(_active_unit, target, _attack_profile)
+
+
+## Resolve and play out one attack, then return to the menu. The mechanics (hit roll + damage)
+## are computed up front by `CombatResolver`; the *presentation* is sequenced separately and
+## awaited — swing animation, then apply damage on impact, then a death animation if it was
+## lethal — so other reactions can be slotted into this sequence later. Input is gated by
+## `_resolving_action` for the duration so a second attack can't be queued mid-swing.
+func _commit_attack(attacker: Unit, target: Unit, attack: Attack) -> void:
+	_resolving_action = true
+	_battlefield.clear_attack_range()
+
+	var outcome := CombatResolver.resolve(attacker, target, attack, _rng)
+	print("%s attacks %s with %s — roll %.2f vs %.2f → %s (%d dmg)" % [
+		attacker.display_name(), target.display_name(), attack.display_name,
+		outcome["roll"], outcome["chance"], "HIT" if outcome["hit"] else "MISS", outcome["damage"]])
+
+	# Presentation: swing first, then land the damage, then topple the target if it died.
+	await attacker.play_attack_animation(attack.anim, target.global_position)
+	if outcome["hit"]:
+		target.apply_damage(outcome["damage"])
+		_spawn_damage_number(target, outcome["damage"])  # floats independently of the turn flow
+		if not target.is_alive():
+			await _kill_unit(target)
+
+	_resolving_action = false
+	_start_turn()
+
+
+## Pop a floating "-N" damage number above `target` and let it rise/fade on its own. Parented
+## to the battlefield (not the target) so it finishes even if the target dies and is freed; not
+## awaited, so it drifts while the turn carries on. Generic effect — see `FloatingCombatText`.
+func _spawn_damage_number(target: Unit, amount: int) -> void:
+	var head := target.global_position + Vector3.UP * DAMAGE_NUMBER_HEIGHT
+	FloatingCombatText.spawn(_battlefield, head, "-%d" % amount, DAMAGE_NUMBER_COLOR)
+
+
+## Play a unit's death animation, then remove it from the battle: free its tile, drop it from
+## the turn schedule (so it never gets another turn), and free the node. Awaited by the attack
+## sequence so the turn doesn't resume until the body has toppled and faded.
+func _kill_unit(unit: Unit) -> void:
+	await unit.play_death_animation()
+	_units_by_tile.erase(unit.grid_coord)
+	_turn_manager.unregister(unit)
+	# If we were inspecting the unit that just died, drop the hover so next frame doesn't touch
+	# the freed instance and the panel closes cleanly.
+	if _hover_unit == unit:
+		_hover_unit = null
+		_hide_stat_panel()
+	unit.queue_free()
+
+
 # --- Turn / active-unit management -------------------------------------------
 
 ## Begin (or restart) the active unit's turn: enter the menu phase with "Move"
@@ -494,6 +609,7 @@ func _clear_plan() -> void:
 	_planned_waypoints.clear()
 	_battlefield.clear_path()
 	_battlefield.clear_move_range()
+	_battlefield.clear_attack_range()
 
 
 ## Instantiate one unit from a `Recruit`, stand it on tile (x, z), and register it in
@@ -717,4 +833,5 @@ func _relocate_unit(unit: Unit, dest: Vector2i) -> void:
 func _is_player_turn() -> bool:
 	return _active_unit != null \
 		and _active_unit.allegiance == Unit.Allegiance.PLAYER \
-		and not _map_transition_playing
+		and not _map_transition_playing \
+		and not _resolving_action

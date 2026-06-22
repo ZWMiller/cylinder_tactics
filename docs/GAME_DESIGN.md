@@ -289,3 +289,56 @@ now so we don't have to retrofit:
 - [ ] Fall damage is computed from drop distance and unit stats, not a global constant.
 - [ ] All visuals are **geometry + flat-color materials** (cylinder+cone units, colored
       boxes, brown earth sides). No sprites or texture mapping in the prototype.
+
+---
+
+## 9. Meta-structure — roguelite campaign (future discussion)
+
+**Status: Later / mostly Open.** Captured here so the prototype doesn't paint us into a
+corner; **not to be designed in earnest until a single battle is fun *and* a "battle end →
+pick a reward → next battle" loop exists** (see `docs/TODO.md`). One decision is locked; the
+rest is an explicit future discussion.
+
+**Concept.** The core gameplay stays the FF-Tactics battle. Wrap it in a roguelite
+"choose-your-own-adventure": each **act** plays out over a branching **node map**
+(Slay-the-Spire / Inscryption style) you move through, making choices. Most nodes are
+**battles** (some scripted/story, some skirmishes), interspersed with non-battle nodes —
+**rest "tents"** (heal, à la StS), shops, and events. The story spans **multiple acts** with
+scripted battles, and could branch into **different storylines / multiple final acts** based
+on choices.
+
+**Decided (locked): persistent party across a campaign-shaped map.** Your party carries over
+between battles and across the map — runs are *chapters*, not fresh starts. Characters
+**accrue levels by playing**, and you spend **loot** (between battles/runs) to upgrade them:
+weapons, stat boosts, spells, jobs. You keep a **bench** of units and **swap** the active
+squad between battles.
+
+**The roguelite hook — in-run build modifiers.** Slay-the-Spire-style relics/cards that change
+*how combat behaves*: "all melee now deals poison," "archers crit more," etc. This is the most
+replayable, most distinctive layer — and it maps cleanly onto the **generic combat pipeline**
+(`Attack` profiles + `CombatResolver` + the resolve→animate→damage sequence), as on-hit /
+damage-modifier / status hooks. Treat this as a headline feature, not a side system.
+
+**How it maps to the architecture (why we can defer it safely):**
+- The planned **`Encounter` resource** *is* a battle node's payload; the reusable
+  **`Battle.tscn`** is the node you enter. A map is "a graph of `Encounter`s + rest/shop/event
+  nodes."
+- Make `Battle.tscn` **return a result** (survivors, loot, XP) so a run controller consumes it.
+- A new **`RunState`** layer (above the battle) holds the persistent party + bench, inventory /
+  gold, active build-modifiers, and map position. Battles read/write it instead of `Main`
+  hardcoding rosters.
+- Loot already has homes: weapons = stat-modifier resources or `Attack` profiles, spells =
+  `Attack` resources, jobs = `ClassDef`. Build-modifiers = a new relic/hook system on the
+  combat pipeline.
+
+**Open questions / tensions to resolve in the future discussion:**
+- **Pacing.** Tactics battles are long (10–20 min) vs. StS's 1–3 min fights; a full act of
+  big battles is a multi-hour run. Mitigate with shorter maps, lighter skirmishes between
+  elite/boss battles, or fewer-but-meatier nodes. Structural, not a tuning pass.
+- **Permadeath rules** with a persistent party + bench — do fallen/benched units die for good?
+- **Power creep.** Persistent levels *and* per-run build modifiers can trivialize later
+  battles; decide what (if anything) resets per act/run.
+- **Narrative scope** (the biggest solo-dev trap). Branching stories / multiple endings are a
+  content black hole. Build the tree to *support* branches but **author one linear act first**.
+- Meta layer (cross-run unlocks/upgrades) — needed at all with a persistent party, or does
+  between-battle loot cover it?

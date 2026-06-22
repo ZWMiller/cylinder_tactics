@@ -97,6 +97,23 @@ var ct: int = 0
 ## a predictable arrival, unlike the ease-out of a `lerp`.
 const MOVE_SPEED := 6.0
 
+## "Bonk" melee animation tunables — a brown stick that winds up, swings on the attacker toward
+## the target, pauses on impact, then recoils. Kept here with the other Unit presentation so the
+## look lives next to the body. Tuned slow + readable: wind up, slow swing, beat, recoil.
+const _BONK_STICK_COLOR := Color(0.40, 0.26, 0.13)        ## Brown, like a wooden cudgel.
+const _BONK_STICK_SIZE := Vector3(0.14, 0.14, 0.75)       ## Chunky rod, long along +Z (toward target).
+const _BONK_RAISED_DEG := -55.0                            ## Stick angle wound back, pre-swing.
+const _BONK_STRUCK_DEG := 35.0                             ## Stick angle at the bottom of the swing.
+const _BONK_RECOIL_DEG := -20.0                            ## Settle angle after the hit.
+const _BONK_LOAD_TIME := 0.35                              ## Seconds held wound-back before swinging (the "load").
+const _BONK_DOWN_TIME := 0.28                              ## Seconds for the (slow, accelerating) downswing.
+const _BONK_HOLD_TIME := 0.18                              ## Seconds paused at impact — a readable beat.
+const _BONK_UP_TIME := 0.18                                ## Seconds for the recoil.
+
+## Death animation tunables — tip over sideways, then fade out (both eased slow for readability).
+const _DEATH_FALL_TIME := 0.55                             ## Seconds to topple to the ground.
+const _DEATH_FADE_TIME := 0.80                             ## Seconds to fade to transparent.
+
 ## The remaining points this unit is walking through, front first (in the parent's
 ## local space). Built from `Battlefield.path_to_world_points`, so the unit steps
 ## up/down tile by tile instead of gliding in a straight line. Empty when stopped.
@@ -296,6 +313,103 @@ func stats_panel_text() -> String:
 		s.move, s.jump, s.speed, ct, TurnManager.CT_THRESHOLD,
 		s.phys_atk, s.mag_atk, s.phys_def, s.mag_def,
 	]
+
+
+# --- Combat ------------------------------------------------------------------
+
+## The basic attack this unit performs from the "Attack" action. For now every unit uses the
+## default physical melee (reach 1); later this will come from the unit's class/abilities, so
+## an archer's basic attack could be a longer-range shot. Returns a fresh profile each call.
+func physical_attack() -> Attack:
+	return Attack.physical_melee()
+
+
+## Subtract `amount` from this unit's live HP, never below 0. The attacker's resolver computed
+## the number; this just applies it. Death is detected separately via `is_alive` so the caller
+## can sequence the death animation.
+func apply_damage(amount: int) -> void:
+	current_hp = maxi(0, current_hp - amount)
+
+
+## True while this unit still has HP. Once false the unit is dead and should be removed (after
+## its death animation) — see `Main._kill_unit`.
+func is_alive() -> bool:
+	return current_hp > 0
+
+
+## Play the attack animation for `anim_kind`, aimed at `target_position` (world space), and
+## return when it finishes. The animation is intentionally decoupled from the mechanics so the
+## caller can sequence it around the damage step and stack other reactions; switching on the
+## kind keeps room for future projectiles/spells that reuse the same call.
+func play_attack_animation(anim_kind: int, target_position: Vector3) -> void:
+	match anim_kind:
+		Attack.AnimKind.BONK:
+			await _play_bonk(target_position)
+		_:
+			await _play_bonk(target_position)
+
+
+## The melee "bonk": spawn a thin brown stick on this unit, oriented at the target, swing it
+## down then recoil, and remove it. Built under a pivot node so a single rotation drives the
+## swing; the pivot is yawed to face the target so the arc reads as a strike toward it.
+func _play_bonk(target_position: Vector3) -> void:
+	var pivot := Node3D.new()
+	add_child(pivot)
+	pivot.position = Vector3(0.0, _mesh_height(_body.mesh) * 0.7, 0.0)  # roughly chest height
+	# Yaw the pivot so its local +Z points at the target; the swing (around local X) then arcs
+	# in the vertical plane toward the target.
+	var to_target := target_position - global_position
+	to_target.y = 0.0
+	if to_target.length() > 0.01:
+		pivot.rotation.y = atan2(to_target.x, to_target.z)
+
+	var stick := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = _BONK_STICK_SIZE
+	stick.mesh = mesh
+	stick.material_override = _solid_material(_BONK_STICK_COLOR)
+	stick.position = Vector3(0.0, 0.0, _BONK_STICK_SIZE.z * 0.5)  # extend forward, toward target
+	pivot.add_child(stick)
+
+	pivot.rotation.x = deg_to_rad(_BONK_RAISED_DEG)  # wind back
+	# Sequence: hold wound-back (load) → accelerate down into the hit → pause on impact (a beat)
+	# → recoil. Each step is its own tween segment so the timings read distinctly.
+	var swing := create_tween()
+	swing.tween_interval(_BONK_LOAD_TIME)
+	swing.tween_property(pivot, "rotation:x", deg_to_rad(_BONK_STRUCK_DEG), _BONK_DOWN_TIME) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)   # accelerate into the strike
+	swing.tween_interval(_BONK_HOLD_TIME)
+	swing.tween_property(pivot, "rotation:x", deg_to_rad(_BONK_RECOIL_DEG), _BONK_UP_TIME) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	await swing.finished
+	pivot.queue_free()
+
+
+## Play the death animation — topple sideways onto the ground, then fade to transparent — and
+## return when done. Pure presentation: the caller frees the unit and clears its occupancy
+## afterward. Fading needs the materials in alpha-blend mode, so we flip that first.
+func play_death_animation() -> void:
+	var fall := create_tween()
+	fall.set_trans(Tween.TRANS_QUAD)
+	fall.set_ease(Tween.EASE_OUT)
+	fall.tween_property(self, "rotation_degrees:z", -90.0, _DEATH_FALL_TIME)  # tip onto its side
+	await fall.finished
+
+	# Fade both meshes out together. Tween the whole albedo color (to alpha 0) so we don't rely
+	# on sub-component tween paths; flip each material to alpha blending first so it shows.
+	var body_mat := _body.material_override as StandardMaterial3D
+	var hat_mat := _hat.material_override as StandardMaterial3D
+	body_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	hat_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var body_clear := body_mat.albedo_color
+	var hat_clear := hat_mat.albedo_color
+	body_clear.a = 0.0
+	hat_clear.a = 0.0
+	var fade := create_tween()
+	fade.set_parallel(true)
+	fade.tween_property(body_mat, "albedo_color", body_clear, _DEATH_FADE_TIME)
+	fade.tween_property(hat_mat, "albedo_color", hat_clear, _DEATH_FADE_TIME)
+	await fade.finished
 
 
 # --- Appearance --------------------------------------------------------------

@@ -109,6 +109,17 @@ var _path_illegal_material: StandardMaterial3D
 ## so sweeping the mouse around to preview routes never allocates per frame.
 var _path_markers: Array[MeshInstance3D] = []
 
+# --- Attack-range overlay (see show_attack_range / clear_attack_range) ---------
+
+## Shared translucent ORANGE material for attack-range tiles — a filled marker on every tile a
+## unit can strike from where it stands. Distinct from the move-range outline (blue/black) so
+## "where I can hit" reads differently from "where I can walk".
+var _attack_marker_material: StandardMaterial3D
+
+## Grown-on-demand pool of attack-range markers (same pooling as the path markers), reusing the
+## shared `_path_marker_mesh` plane.
+var _attack_markers: Array[MeshInstance3D] = []
+
 # --- Move-range outline overlay (see show_move_range / clear_move_range) -------
 
 ## A 1x1x1 box, scaled per segment into a thin horizontal sliver (a top edge) or a thin
@@ -164,6 +175,13 @@ func _ready() -> void:
 	_path_illegal_material.albedo_color = Color(1.0, 0.30, 0.30, 0.5)
 	_path_illegal_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_path_illegal_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	# Orange fill for the attack-range overlay — every tile in striking distance (see
+	# show_attack_range). Same flat translucent decal recipe as the path markers.
+	_attack_marker_material = StandardMaterial3D.new()
+	_attack_marker_material.albedo_color = Color(1.0, 0.55, 0.10, 0.5)
+	_attack_marker_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_attack_marker_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 
 	# Move-range outline: one shared 1x1 flat strip (scaled per edge segment) and one
 	# opaque BLACK material. Drawn only along the border of the reachable region (see
@@ -466,6 +484,50 @@ func show_path(tiles: Array, legal_flags: Array = []) -> void:
 ## Hide the movement-path preview overlay.
 func clear_path() -> void:
 	for marker in _path_markers:
+		marker.visible = false
+
+
+## Every tile within `[min_range, max_range]` Manhattan steps of `origin`, clipped to the grid.
+## Generic targeting math shared by all attacks: melee passes 1..1, a bow 3..6, a spell its own
+## band. `min_range > 1` excludes point-blank tiles (so ranged attacks can't hit adjacent).
+## Height is ignored for now — this is flat grid distance. Drives the orange attack overlay and
+## the click-to-target validation.
+func tiles_in_range(origin: Vector2i, min_range: int, max_range: int) -> Array:
+	var result: Array[Vector2i] = []
+	for dx in range(-max_range, max_range + 1):
+		for dz in range(-max_range, max_range + 1):
+			var dist: int = abs(dx) + abs(dz)
+			if dist < min_range or dist > max_range:
+				continue
+			var t := Vector2i(origin.x + dx, origin.y + dz)
+			if t.x < 0 or t.x >= grid_width or t.y < 0 or t.y >= grid_height:
+				continue
+			result.append(t)
+	return result
+
+
+## Fill each tile in `tiles` with the translucent orange attack-range marker. Same
+## grown-on-demand / hide-leftovers pooling as the path preview. Empty list hides all.
+func show_attack_range(tiles: Array) -> void:
+	while _attack_markers.size() < tiles.size():
+		var marker := MeshInstance3D.new()
+		marker.mesh = _path_marker_mesh   # reuse the shared inset plane
+		marker.material_override = _attack_marker_material
+		marker.visible = false
+		add_child(marker)
+		_attack_markers.append(marker)
+	for i in _attack_markers.size():
+		var marker: MeshInstance3D = _attack_markers[i]
+		if i < tiles.size():
+			marker.position = tile_to_world(tiles[i].x, tiles[i].y) + Vector3(0.0, 0.03, 0.0)
+			marker.visible = true
+		else:
+			marker.visible = false
+
+
+## Hide the attack-range overlay.
+func clear_attack_range() -> void:
+	for marker in _attack_markers:
 		marker.visible = false
 
 

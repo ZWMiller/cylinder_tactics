@@ -67,8 +67,57 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       loop; `Main` plays a cinematic (zoom out to whole map → hold → shift → hold → zoom back in)
       then resumes via `continue_after_transition`. New `ShiftCounter` HUD (top-right "Shift in:
       N") telegraphs the countdown. Debug **T** key previews the cinematic. See `docs/DECISION_LOG.md`.
+- [x] Combat — first pass (melee) — generic attack pipeline: `Attack` resource profile
+      (`min_range`/`max_range`, `power` phys/mag, `anim`), `CombatResolver` (static `hit_chance`
+      [mock 1.0] / `compute_damage` `atk−def` floored at 1 / `resolve`). "Attack" menu →
+      `Phase.ATTACK`: orange reach fill (`Battlefield.tiles_in_range` + `show_attack_range`),
+      click an in-range enemy to commit. `Main._commit_attack` resolves mechanics, then
+      sequences presentation separately — `Unit.play_attack_animation` (the "bonk" stick swing)
+      → apply damage → floating `-N` (`FloatingCombatText`, self-freeing Label3D) → death
+      (`Unit.play_death_animation` topple+fade) → remove from board + turn order. See
+      `docs/DECISION_LOG.md`.
 
 ## Next
+
+### Next up — ranged + magic attacks, and a Spells menu
+The melee pipeline was built generic for exactly this; most of the work is *data + a projectile
+animation + a conditional menu*, not new mechanics.
+- [ ] **Arrow (ranged physical) + Fireball (magic) attacks** — author `Attack` profiles with a
+      range *band* that excludes point-blank (e.g. bow `min_range 3 / max_range 6`, fireball
+      similar) and, for fireball, `power = MAGICAL` (so `CombatResolver` reads `mag_atk`/`mag_def`
+      automatically). Targeting (`tiles_in_range`, orange overlay, click-to-commit) already
+      supports `min_range > 1`.
+- [ ] **Projectile animations** — add `AnimKind` cases (e.g. `ARROW`, `FIREBALL`) + new
+      branches in `Unit.play_attack_animation` (or a dedicated effects helper) for a travelling
+      projectile from attacker → target, instead of the on-attacker bonk. Keep them awaitable
+      and separate like the bonk so the resolve→animate→damage→float→death sequence is reused.
+- [ ] **Per-unit spell list + conditional "Spells" menu** — give `Unit` a list of known
+      abilities (data; the Mage *starts with Fireball*). The action menu becomes per-unit: show a
+      **"Spells"** option only when the active unit has ≥1 spell. Selecting it lists the unit's
+      spells; picking one enters `Phase.ATTACK` with that `Attack` profile (the basic "Attack"
+      stays the reach-1 melee). Needs the menu options built per active unit rather than the
+      current fixed `MENU_OPTIONS`.
+- [ ] **(stretch) enemy attacks** — let the enemy AI use the same `_commit_attack` path when a
+      target is in range, so combat is two-sided. Resolver + animations are already generic.
+
+### After the single battle is fun — the run loop
+Sequenced deliberately: finish a *complete, fun single battle* first, then a minimal
+between-battles loop, and only **then** open the big game-flow discussion. Don't leapfrog.
+- [ ] **Battle → reward → next battle loop** — `Battle.tscn` (the planned reusable battle
+      scene) **returns a result** (who survived, loot/XP earned). After a win, show a **reward
+      select** screen, then launch the next battle with the carried-over party. Needs the
+      `Encounter` resource + a thin `RunState` (persistent party/bench, inventory) feeding the
+      roster instead of `Main` hardcoding it. This is the spine the whole campaign hangs on.
+- [ ] **★ BIG — resolve the "flow of the game" (roguelite campaign).** Design discussion +
+      decisions for the meta-structure: a Slay-the-Spire-style branching **node map** per
+      **act**, rest "tents" / shops / events between battles, a unit **bench** with swapping,
+      **loot → upgrades** (weapons / stat boosts / spells / jobs), in-run **build modifiers**
+      ("poison melee", "archer crits") hooked into the combat pipeline, and **multi-act story**
+      (possibly branching endings). **Decided:** *persistent party across a campaign-shaped map*
+      (party carries over; runs are chapters). Everything else is open — see `docs/GAME_DESIGN.md`
+      §9 for the full capture, the architecture mapping (`Encounter`/`RunState`/`Battle.tscn`
+      returns a result), and the tensions to resolve (pacing, permadeath, power creep, narrative
+      scope). **Do NOT start until the two items above are done.**
 
 ### Then
 - [x] Turn order / turn-based loop — extracted as `TurnManager` (the first split off `Main`,
@@ -130,6 +179,11 @@ The move to **node composition + signals** as the battle architecture landed wit
 `TurnManager` extraction — logged in `docs/DECISION_LOG.md` (2026-06-21).
 
 ## Polish / nice-to-have
+- [ ] Live-update visible stat blocks (HP/MP/CT) — the `StatPanel` (hover) and `StatusPanel`
+      (status box) call `Unit.stats_panel_text()` once when shown, so a block on screen when a
+      unit takes damage / spends MP / charges CT shows stale numbers. Refresh while visible
+      (re-fetch the text each frame, or — better — have `Unit` emit a `stats_changed` signal that
+      the open panels listen to and re-render). Same applies to the active unit's status box mid-turn.
 - [ ] Distinguish committed-waypoint tiles from the hover tail in the path preview
       (e.g. a stronger color), and maybe a destination marker
 - [ ] Tune `Unit.MOVE_SPEED` and the step cadence once real maps exist
@@ -139,7 +193,8 @@ The move to **node composition + signals** as the battle architecture landed wit
 - [ ] Unit movement tile-to-tile (with movement range based on grid distance + Z cost)
 - [ ] Turn order / turn-based loop
 - [ ] Multiple grid sizes
-- [ ] Basic combat (attack range, damage)
+- [x] Basic combat (attack range, damage) — melee first pass done (see "Done" above); ranged +
+      magic are the "Next up" items.
 - [ ] Character classes (soldier/archer/mage) + class-driven stat blocks — see `docs/GAME_DESIGN.md` §2–3
 - [~] Time-degradation map shift every N turns — *trigger + cadence + cinematic done*
       (turn-counted in `TurnManager`, cinematic in `Main`); **still TODO: units fall + take

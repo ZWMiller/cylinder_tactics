@@ -6,6 +6,57 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-21 — Combat first pass: generic attack pipeline (range → target → resolve → animate), mechanics split from presentation
+
+**Decision:** Built a deliberately *generic* attack pipeline so melee, arrows, and spells are
+one mechanical path differing only by data, and kept the **mechanics separate from the
+presentation** so animations can be sequenced/stacked around the numbers.
+
+- **`Attack` resource (profile) is the "different settings" knob** (`scripts/combat/Attack.gd`):
+  `display_name`, `min_range`/`max_range` (inclusive Manhattan band — `min_range > 1` is what makes
+  a bow/spell unable to hit point-blank), `power` (PHYSICAL→`phys_atk`/`phys_def`,
+  MAGICAL→`mag_atk`/`mag_def`), and `anim` (AnimKind). A `Resource` so attacks can later be
+  authored as `.tres` per class/ability; built in code for now (`Attack.physical_melee()` = reach 1).
+  Kept pure data (no `Unit` ref) — the resolver reads stats, the unit plays the animation.
+- **`CombatResolver` = pure mechanics** (`scripts/combat/CombatResolver.gd`, static module like
+  `UnitClasses`). `hit_chance` is a **mock returning 1.0** — the deterministic-first stance from
+  GAME_DESIGN.md, but the dice are already wired (`resolve` rolls `rng.randf() < chance`) so adding
+  real evasion later is a one-function change. `compute_damage` = `atk − def` floored at 1 (the
+  agreed subtractive, small-numbers formula). Side-effect free: returns `{hit, chance, roll,
+  damage}`; the caller applies it. That split lets the same resolution serve player, enemy, or
+  scripted attacks.
+- **Targeting on `Battlefield`** (generic): `tiles_in_range(origin, min, max)` (grid-clipped
+  Manhattan band, height ignored for now) + an **orange fill** overlay (`show_attack_range` /
+  `clear_attack_range`, its own pooled markers) — a *fill* of "where I can hit", distinct from the
+  move-range *outline*.
+- **Flow in `Main`** — new `Phase.ATTACK` + "Attack" menu option. Pick Attack → orange reach →
+  click an in-range **enemy** to commit (allies/empty/out-of-range ignored). Attacking returns to
+  the menu (like Move), not auto-ending the turn. `_resolving_action` gates input during the
+  sequence.
+- **Mechanics vs presentation split** — `_commit_attack` computes the outcome up front, then
+  *sequences presentation separately and awaits it*: `Unit.play_attack_animation(anim, target_pos)`
+  → apply damage → `FloatingCombatText` "-N" pop → `Unit.play_death_animation` if lethal → remove
+  from `_units_by_tile` + `TurnManager.unregister` + free. This ordering is the extension seam:
+  new reactions slot into the sequence without touching the resolver.
+- **Animations live on `Unit`, awaitable, dispatched by `AnimKind`.** The melee "bonk" is a brown
+  stick built under a yaw pivot aimed at the target (wind-up → accelerating downswing → impact
+  beat → recoil), tuned slow for readability. Death = topple sideways (rotate z→−90°) then fade
+  both per-unit materials to alpha 0. New attacks add an `AnimKind` case (projectiles next).
+- **`FloatingCombatText`** — a self-freeing billboarded `Label3D` damage number, **parented to the
+  battlefield, not the target**, and *not awaited*, so it completes its rise/fade even if the
+  target dies and is freed mid-float. Generic (text + color) for future heals/misses.
+
+**Why:** The brief was explicitly "make the primitives generic so magic/arrows reuse the
+mechanical pieces with different settings, and control animation separately so we can stack
+animations." Range/power/anim-as-data + a pure resolver + awaitable per-unit animations delivers
+exactly that: ranged and magic become new `Attack` profiles + new anim cases, no pipeline rewrite.
+
+**Rejected:** baking animation into the resolve step (couldn't reorder/stack effects); damage
+numbers parented to the target (would vanish when it dies); a hit-or-nothing roll (the agreed
+formula is subtractive `atk−def`, deterministic-first with the dice scaffolded for later).
+
+---
+
 ## 2026-06-21 — Turn-counted map shift (cinematic that pauses the turn loop) + camera intro/follow
 
 **Decision:** Drove the map time-shift off the *turn count* and made it a coordinated camera
