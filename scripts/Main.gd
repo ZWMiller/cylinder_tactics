@@ -7,9 +7,12 @@
 ##     through any right-click waypoints to the tile under the cursor; left-click
 ##     commits the walk (stepping up/down tile by tile); Escape returns to the menu.
 ##
-## The active-unit pointer (`_active_unit`) is the seam the future turn system will
-## own; today "End Turn" just cycles player units in spawn order. The per-step path is
-## also the foundation for jump-height gating later (Battlefield.path_step_heights).
+## Whose turn it is now lives in `TurnManager` (the first node carved out of this "God
+## node" toward a reusable Battle.tscn): it picks the active unit by FFT-style Charge Time
+## (speed-driven) and announces each hand-off via `active_unit_changed`, which we react to
+## in `_on_active_unit_changed`. Player turns open the menu; enemy turns are driven by the
+## placeholder AI in `_take_enemy_turn` (random legal move). The per-step path is also the
+## foundation for jump-height gating later (Battlefield.path_step_heights).
 ##
 ## This is still demo glue: real spawning will come from map/encounter data with the
 ## turn loop. It lives here so `Battlefield` stays focused on terrain.
@@ -36,6 +39,11 @@ const HOVER_DELAY := 1.0
 
 ## How far above a unit's origin to float its stat panel, in world units.
 const STAT_PANEL_HEIGHT := 2.6
+
+## How long (seconds) to pause before an enemy acts, so its AI turn reads as a deliberate
+## action rather than an instant teleport. The pause also lets the turn hand-off finish
+## before the move starts (see `_take_enemy_turn`), keeping the flow re-entrancy-free.
+const ENEMY_TURN_DELAY := 0.4
 
 ## The two input phases of a turn: choosing an action, or placing a move.
 enum Phase { MENU, MOVE }
@@ -65,8 +73,9 @@ var _rng := RandomNumberGenerator.new()
 ## The terrain grid, cached so the click handler can ray-pick tiles against it.
 @onready var _battlefield: Battlefield = $Battlefield
 
-## The orthographic camera, needed to turn a mouse position into a pick ray.
-@onready var _camera: Camera3D = $Camera3D
+## The orthographic camera rig, needed to turn a mouse position into a pick ray and to slew
+## the view onto the active unit's tile (`CameraController.focus_on`).
+@onready var _camera: CameraController = $Camera3D
 
 ## The bottom-left action HUD. Created in code in `_ready`.
 var _menu: ActionMenu
@@ -81,13 +90,14 @@ var _phase: Phase = Phase.MENU
 ## Which menu option is highlighted (index into MENU_OPTIONS).
 var _menu_index: int = 0
 
-## Which unit currently takes its turn. We set this ourselves for now; later the turn
-## scheduler will. Highlighted via `Unit.set_active` so it's visible on screen.
-var _active_unit: Unit = null
+## The turn scheduler that decides whose turn it is (speed/CT order). Created in `_ready`,
+## the same code-instantiated pattern as the HUD panels. The owner of turn state.
+var _turn_manager: TurnManager
 
-## Every player-controlled unit, in spawn order, so "End Turn" can cycle them (a
-## stand-in for real turn order until that system exists).
-var _player_units: Array[Unit] = []
+## A mirror of `_turn_manager.active()`, updated only in `_on_active_unit_changed`. The
+## move/menu/hover code reads it for convenience; the turn manager remains the source of
+## truth (this is never written elsewhere).
+var _active_unit: Unit = null
 
 ## Which unit occupies each tile, keyed by grid coordinate (Vector2i). Lets us block
 ## moving onto an occupied tile now, and will resolve attacks by tile later.
@@ -144,6 +154,12 @@ func _ready() -> void:
 
 	_rng.seed = 12345          # fixed seed: same rolled enemies every run while testing
 
+	# The turn scheduler owns whose turn it is; we just listen for the hand-off. Built
+	# before spawning so each spawned unit can register itself with it.
+	_turn_manager = TurnManager.new()
+	add_child(_turn_manager)
+	_turn_manager.active_unit_changed.connect(_on_active_unit_changed)
+
 	# Players from authored recruits; enemies rolled from class+level into recruits.
 	for entry in _player_roster:
 		_spawn_recruit(entry[0], entry[1], Unit.Allegiance.PLAYER, entry[2])
@@ -151,8 +167,9 @@ func _ready() -> void:
 		var foe := StatRoll.random_recruit(entry[2], entry[3], _rng)
 		_spawn_recruit(entry[0], entry[1], Unit.Allegiance.ENEMY, foe)
 
-	if not _player_units.is_empty():
-		_set_active_unit(_player_units[0])
+	# Kick off the loop: this charges up to the first actor and emits active_unit_changed,
+	# which lands in _on_active_unit_changed and starts that unit's turn.
+	_turn_manager.begin()
 
 
 ## Godot lifecycle hook: runs every frame. Drives the hover-to-inspect panel — after
@@ -196,7 +213,7 @@ func _process(delta: float) -> void:
 ## We only touch the menu keys during MENU phase and consume just those, leaving all
 ## other input (mouse, camera) to flow normally.
 func _input(event: InputEvent) -> void:
-	if _active_unit == null or _phase != Phase.MENU:
+	if not _is_player_turn() or _phase != Phase.MENU:
 		return
 	if event.is_action_pressed("ui_up"):
 		_set_menu_index(_menu_index - 1)
@@ -212,7 +229,7 @@ func _input(event: InputEvent) -> void:
 ## Godot input hook for events nothing else consumed. Only the MOVE phase reacts here
 ## (menu keys are handled earlier in `_input`); in MENU phase tile clicks do nothing.
 func _unhandled_input(event: InputEvent) -> void:
-	if _active_unit == null or _phase != Phase.MOVE:
+	if not _is_player_turn() or _phase != Phase.MOVE:
 		return
 	_move_input(event)
 
@@ -236,7 +253,7 @@ func _activate_menu_option() -> void:
 		"Stats":
 			_inspect_active_unit()
 		"End Turn":
-			_cycle_active_unit()
+			_turn_manager.end_turn()
 
 
 ## "Stats" action: print the active unit's full block (for console verification) and
@@ -328,9 +345,11 @@ func _add_waypoint(screen_point: Vector2) -> void:
 	_refresh_path_preview()
 
 
-## Commit the move: walk the active unit along current tile -> waypoints -> the
-## clicked destination, stepping tile by tile, then return to the action menu. Blocks
-## only if the *destination* is occupied; per-tile reachability/jump gates come later.
+## Player "commit move": build the route from current tile -> waypoints -> the clicked
+## destination, gate it, walk it, then return to the action menu. The gate refuses an
+## illegal route (the preview already shows which red tiles broke it) by staying in move
+## mode. The actual move is handed to `_perform_move`, the shared action the enemy AI also
+## uses — this function is just the *player's* way of choosing the destination.
 func _commit_move(screen_point: Vector2) -> void:
 	if _active_unit.is_moving():
 		return
@@ -355,15 +374,20 @@ func _commit_move(screen_point: Vector2) -> void:
 	if flags.has(false):
 		return
 
-	var final_tile: Vector2i = tile_path.back()
-	# Update occupancy to the destination, then walk the stepped polyline.
-	_units_by_tile.erase(_active_unit.grid_coord)
-	_active_unit.grid_coord = final_tile
-	_units_by_tile[final_tile] = _active_unit
-	_active_unit.move_along(_battlefield.path_to_world_points(tile_path))
-
+	_perform_move(tile_path)
 	# Back to the menu (so you can End Turn). The unit keeps walking meanwhile.
 	_start_turn()
+
+
+## Carry out a validated, expanded `tile_path` for the active unit: move its occupancy/grid
+## address to the final tile, clear the planning overlays, and start the stepped walk. This
+## is the shared "a unit moves" action — the player commit (above) and the enemy AI both
+## build a `tile_path` their own way and hand it here, so movement behaves identically for
+## both sides and future, smarter AI can drive the very same action a player does.
+func _perform_move(tile_path: Array) -> void:
+	_relocate_unit(_active_unit, tile_path.back())
+	_clear_plan()   # committed: drop waypoints and hide the path/range overlays
+	_active_unit.move_along(_battlefield.path_to_world_points(tile_path))
 
 
 # --- Turn / active-unit management -------------------------------------------
@@ -403,7 +427,9 @@ func _enter_move_phase() -> void:
 ## blue/red path legality). Computed once when move mode opens because none of it changes
 ## until the unit actually moves — occupancy is fixed and the unit is still on its start
 ## tile. Other units' tiles are classified by side: ANY unit blocks stopping, but only an
-## ENEMY blocks passage (you may walk through an ally, just not stop on one).
+## ENEMY blocks passage (you may walk through an ally, just not stop on one). The enemy AI
+## reuses these snapshotted sets (it enters the same move phase), so both sides see the
+## same board.
 func _compute_move_constraints() -> void:
 	_move_solid = {}
 	_move_occupied = {}
@@ -429,8 +455,9 @@ func _clear_plan() -> void:
 
 
 ## Instantiate one unit from a `Recruit`, stand it on tile (x, z), and register it in
-## the occupancy map (and the player roster if it's ours). Both authored PCs and rolled
-## enemies arrive here as a Recruit, so they share one rich spawn path.
+## the occupancy map and the turn schedule. Both authored PCs and rolled enemies arrive
+## here as a Recruit, so they share one rich spawn path — and both sides join the turn
+## order (the turn manager, not allegiance, decides who acts when).
 func _spawn_recruit(x: int, z: int, side: Unit.Allegiance, recruit: Recruit) -> void:
 	var unit: Unit = UNIT_SCENE.instantiate()
 	# Set allegiance (the body-color channel) before add_child so the unit's own _ready
@@ -443,8 +470,7 @@ func _spawn_recruit(x: int, z: int, side: Unit.Allegiance, recruit: Recruit) -> 
 	unit.position = _battlefield.tile_to_world(x, z)
 
 	_units_by_tile[unit.grid_coord] = unit
-	if side == Unit.Allegiance.PLAYER:
-		_player_units.append(unit)
+	_turn_manager.register(unit)
 
 
 # --- Stat inspect panel (hover + "Stats" action) -----------------------------
@@ -474,34 +500,113 @@ func _position_stat_panel(unit: Unit) -> void:
 	_stat_panel.place_above(_camera.unproject_position(head))
 
 
-## Make `unit` the active one: swap the pointer, mark its tile (the FFT-style "whose
-## turn" highlight, tinted by side), set the menu title, and start its turn. The marker
-## is kept tracking the unit's tile each frame in `_process`.
-func _set_active_unit(unit: Unit) -> void:
+## React to the turn manager handing the turn to `unit` (its `active_unit_changed` signal).
+## Mirror it into `_active_unit` (the input code reads that), retitle the menu and move the
+## tile marker, then branch by side: a PLAYER gets the action menu; an ENEMY is driven by
+## the placeholder AI. `unit` is null only if the roster empties, in which case we just
+## clear the marker. This replaces the old `_set_active_unit`, which `Main` called itself.
+func _on_active_unit_changed(unit: Unit) -> void:
 	_active_unit = unit
-	if _active_unit != null:
-		_menu.set_title(_active_unit.display_name())  # show whose turn it is
-		_update_active_marker()
-	else:
+	if unit == null:
 		_battlefield.clear_active_tile()
-	_start_turn()
+		return
+	_menu.set_title(unit.display_name())  # show whose turn it is
+	_update_active_marker()
+	if unit.allegiance == Unit.Allegiance.PLAYER:
+		_start_turn()
+	else:
+		_take_enemy_turn(unit)
 
 
-## Place/recolor the active-unit tile marker on the active unit's current tile. Cheap,
-## and called every frame from `_process` so the marker follows the unit as it walks and
-## stays correct after a time-shift changes tile heights.
+## Drive an enemy's turn as the SAME sequence a player performs — just self-driven with no
+## menus — so the player sees the computer obey the identical movement rules ("a fair
+## fight") and we can build smarter AI on the player's own action functions later. The
+## beats, with a pause between each so it reads as a deliberate turn, not a teleport:
+##   1. enter the move phase (`_enter_move_phase`) — pops the reachable-tile outline,
+##   2. pick a random reachable tile and show the chosen path the same way the player
+##      previews theirs (`classify_path` + `show_path`, the very same legal-path overlay),
+##   3. walk it via the shared `_perform_move`, then end the turn when the walk lands
+##      (or end immediately if there was nowhere to go).
+## `await` also defers the work past the signal that triggered this turn, so ending a turn
+## never re-enters the turn manager from inside its own emission.
+func _take_enemy_turn(unit: Unit) -> void:
+	# Hide any stale player menu from the previous turn before the opening pause.
+	_menu.set_menu_visible(false)
+	_status_panel.hide_panel()
+	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
+
+	# Beat 1: the same move phase a player enters — shows the "available blocks" outline and
+	# snapshots the reachability/occupancy the AI will pick from (_reachable/_move_*).
+	_enter_move_phase()
+	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
+
+	# Beat 2: choose where to go. No legal destination → drop the outline and pass.
+	var path := _ai_pick_move(unit)
+	if path.size() < 2:
+		_clear_plan()
+		_turn_manager.end_turn()
+		return
+
+	# Show the chosen route with the player's own legal-path preview, so the move the enemy
+	# is about to make is on screen under the same blue/red rules the player follows.
+	var flags := _battlefield.classify_path(
+		path, unit.max_stats.move, unit.max_stats.jump, _move_solid, _move_occupied)
+	_battlefield.show_path(path, flags)
+	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
+
+	# Beat 3: walk it via the shared action (which clears the overlays), then end the turn
+	# when the walk finishes (one-shot: the connection drops after it fires).
+	unit.move_finished.connect(_on_enemy_move_finished, CONNECT_ONE_SHOT)
+	_perform_move(path)
+
+
+## The AI's destination policy: from the reachable set `_enter_move_phase` just computed into
+## `_reachable`, pick a random tile (preferring to actually move over standing still) and
+## return the legal step-path to it, or `[]` if there's nowhere to go. Reuses the player's
+## snapshotted constraints (`_move_solid`/`_move_occupied`) so the enemy obeys the identical
+## jump/occupancy rules. This is the one enemy-specific piece — swap it for smarter logic
+## later and the rest of the turn (range outline, path preview, move, end) is unchanged.
+func _ai_pick_move(unit: Unit) -> Array:
+	var candidates: Array = _reachable.keys()
+	candidates.erase(unit.grid_coord)   # drop "stay put" so the unit moves when it can
+	if candidates.is_empty():
+		return []
+	var dest: Vector2i = candidates[_rng.randi_range(0, candidates.size() - 1)]
+	return _battlefield.find_path(
+		unit.grid_coord, dest, unit.max_stats.move, unit.max_stats.jump,
+		_move_solid, _move_occupied)
+
+
+## The active enemy finished walking — end its turn so the schedule advances. Bound one-shot
+## in `_take_enemy_turn`; the arg is the unit the signal reports (unused — it's the active one).
+func _on_enemy_move_finished(_unit: Unit) -> void:
+	_turn_manager.end_turn()
+
+
+## Place/recolor the active-unit tile marker on the active unit's tile, and aim the camera at
+## the unit. Called every frame from `_process` so both track the unit as it walks and stay
+## correct after a time-shift. The marker sits on the destination tile (`grid_coord`, which a
+## commit sets immediately), but the camera follows the unit's *live* `global_position` — so
+## it pans *with* the character at walking pace and trails slightly, instead of jumping ahead
+## to the destination and waiting. The camera only moves when the focus changes (see
+## `CameraController._process`), so calling this every frame is free when nothing moved.
 func _update_active_marker() -> void:
 	if _active_unit == null:
 		return
 	_battlefield.set_active_tile(_active_unit.grid_coord, Unit.active_color(_active_unit.allegiance))
+	_camera.focus_on(_active_unit.global_position)
 
 
-## Advance the active unit to the next player unit (wrapping) — i.e. "End Turn". A
-## placeholder for the turn order that will eventually decide whose turn it is.
-func _cycle_active_unit() -> void:
-	if _player_units.is_empty():
-		return
-	# find() returns -1 if the active unit isn't a player unit, so this lands on
-	# index 0 — a sensible default.
-	var idx := _player_units.find(_active_unit)
-	_set_active_unit(_player_units[(idx + 1) % _player_units.size()])
+## Move `unit`'s occupancy entry and grid address to `dest` — the bookkeeping half of a move
+## (the visual walk is the caller's separate `move_along`, run from `_perform_move`). Kept as
+## one helper so occupancy stays consistent however a unit moves.
+func _relocate_unit(unit: Unit, dest: Vector2i) -> void:
+	_units_by_tile.erase(unit.grid_coord)
+	unit.grid_coord = dest
+	_units_by_tile[dest] = unit
+
+
+## True only while a PLAYER unit holds the turn — the gate for all player input (menu keys
+## and move placement), so input does nothing during an enemy's self-driven AI turn.
+func _is_player_turn() -> bool:
+	return _active_unit != null and _active_unit.allegiance == Unit.Allegiance.PLAYER

@@ -6,6 +6,61 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-21 — Turn order: `TurnManager` node (FFT Charge-Time) + signal-driven hand-off; enemies act through the player's own move functions
+
+**Decision:** Carved whose-turn-it-is out of `Main` into a new `TurnManager` node — the first
+step of the planned move to **node composition + signals** (see TODO "Architecture"). It
+owns the active-unit pointer and the turn queue; `Main` listens instead of driving.
+
+- **Scheduling — FFT-style Charge Time (CT).** Each `Unit` carries a live `ct` counter; every
+  "tick" all units gain CT equal to their `speed`, and the first to reach `CT_THRESHOLD`
+  (100) acts. On `end_turn`, `CT_THRESHOLD` is *subtracted* (overflow carries), so faster
+  units act **more often**, not merely earlier — the hook the future time-mage haste/slow
+  powers will modulate. `ct` lives on `Unit` (mutable progress), **not** on `StatBlock`
+  (where `speed`, the charge *rate*, lives) — same split as `current_exp`. Chose CT over a
+  simple speed-sorted round-robin (the rejected "model A") for that variable-frequency
+  behavior; the signal API is identical either way, so it's swappable.
+- **Ties:** highest CT, then higher `speed`, then earlier registration order (a linear scan
+  that only replaces on a *strictly* better unit — deterministic without a stable sort).
+  `maxi(1, speed)` floor guarantees forward progress so the tick loop can't spin forever.
+- **Signals, not calls.** `TurnManager` emits `active_unit_changed(unit)` /
+  `turn_ended(unit)`; `Main._on_active_unit_changed` reacts (mirrors `_active_unit`, retitles
+  the menu, moves the tile marker, branches player-vs-enemy). The announcer doesn't know its
+  listeners — the Godot idiom we're standardizing on for the battle architecture. `Main`
+  keeps a read-only `_active_unit` *mirror* for the input code's convenience; the manager
+  stays the source of truth. Both sides now register with the manager (not the old
+  players-only cycle), so enemies take real turns.
+- **Enemies act through the PLAYER's own action functions** (owner's call — "a fair fight").
+  `_take_enemy_turn` is the same sequence a player performs, self-driven with no menus, paced
+  by `ENEMY_TURN_DELAY` (0.4 s) waits: enter the move phase (`_enter_move_phase` → reachable
+  outline) → pick a destination → show the chosen route with the **same** `classify_path` +
+  `show_path` legal-path overlay the player sees → walk it via the shared `_perform_move` →
+  end the turn. The only enemy-specific code is `_ai_pick_move` (random reachable tile); swap
+  it for smarter logic and the rest of the turn is unchanged. Extracted `_perform_move` (the
+  shared "a unit moves" action) and `_relocate_unit` (occupancy bookkeeping) so player and AI
+  share one movement path.
+- **`Battlefield.find_path(start, dest, move, jump, solid, occupied)`** (new) — BFS with
+  parent links returning a *legal* shortest tile-path. The AI needs this because the player's
+  `expand_path` (naive L-shape) can cross an illegal step even when `dest` is reachable; the
+  player avoids that with manual waypoints, the AI can't, so it walks a guaranteed-legal route.
+- **`Unit.move_finished(unit)` signal** (new) — emitted when a walk's queue empties, so the
+  AI ends the enemy's turn *after* it arrives (no per-frame `is_moving()` polling). A player
+  move doesn't auto-end the turn (the menu reopens so you can act again, then End Turn).
+- **Re-entrancy:** `_take_enemy_turn`'s `await` defers all work past the `active_unit_changed`
+  emission that triggered it, so `end_turn` (which emits again) never recurses through the
+  signal on the call stack. Player input is gated to player turns via `_is_player_turn()`.
+
+**Why:** Turn order was the designated trigger to begin the `Battle.tscn` refactor (it would
+have bloated `Main`'s active-unit logic). Doing it as a signal-emitting node both delivers the
+feature and lays the architecture. Routing enemies through the player's move functions keeps
+one movement code path (less to keep in sync) and makes the AI visibly play by the same rules.
+
+**Rejected:** speed-sorted round-robin (no variable turn frequency); a bespoke enemy mover
+(would duplicate the player's path/preview/commit logic and could drift from its rules);
+polling `is_moving()` to detect arrival (the signal is cheaper and clearer).
+
+---
+
 ## 2026-06-21 — Movement range + jump gate: BFS reachability on Battlefield, outline + blue/red preview
 
 **Decision:** Gated movement by a unit's `move` and `jump` stats with live visual feedback.

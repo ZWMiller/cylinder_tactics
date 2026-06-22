@@ -360,6 +360,56 @@ func reachable_tiles(start: Vector2i, move_points: int, jump: int, solid: Dictio
 	return result
 
 
+## Shortest legal step-path from `start` to `dest` (both inclusive), as a list of
+## orthogonally adjacent tiles, or `[]` if `dest` can't be reached within the limits. Each
+## step obeys the SAME rule as `reachable_tiles` — costs 1, walkable only when the height
+## change is within `jump` and the neighbour isn't `solid`. The path may pass *through*
+## occupied tiles (you can walk past an ally); the caller picks `dest` from the reachable
+## set, which already excludes occupied tiles, so `_occupied` isn't needed here — it's
+## accepted only so this mirrors `reachable_tiles`' signature.
+##
+## BFS with parent links: uniform step cost means the first time we reach `dest` is along a
+## shortest route, so we record where each tile was reached *from* and, on hitting `dest`,
+## walk that chain back to `start` and flip it. The enemy AI hands the result to
+## `Unit.move_along`; the player builds its route from waypoints + `expand_path` instead.
+func find_path(start: Vector2i, dest: Vector2i, move_points: int, jump: int, solid: Dictionary, _occupied: Dictionary) -> Array:
+	var path: Array[Vector2i] = []
+	if start == dest:
+		return [start]   # already there — a one-tile path (no steps to walk)
+	var came_from := {start: start}   # tile -> the tile we first reached it from
+	var costs := {start: 0}
+	var frontier: Array[Vector2i] = [start]
+	var head := 0
+	while head < frontier.size():
+		var cur: Vector2i = frontier[head]
+		head += 1
+		if costs[cur] >= move_points:
+			continue   # no budget left to step further from here
+		for dir in _ORTHO_DIRS:
+			var n: Vector2i = cur + dir
+			if n.x < 0 or n.x >= grid_width or n.y < 0 or n.y >= grid_height:
+				continue   # off the grid
+			if costs.has(n):
+				continue   # already reached along an equal/shorter route
+			if solid.has(n):
+				continue   # impassable tile (enemy unit)
+			if abs(_height_units(n.x, n.y) - _height_units(cur.x, cur.y)) > jump:
+				continue   # climb/drop taller than this unit's jump
+			costs[n] = costs[cur] + 1
+			came_from[n] = cur
+			if n == dest:
+				# Reconstruct dest -> … -> start via parents, then reverse to walk order.
+				var node := dest
+				while node != start:
+					path.append(node)
+					node = came_from[node]
+				path.append(start)
+				path.reverse()
+				return path
+			frontier.append(n)
+	return path
+
+
 ## Per-tile legality for a concrete, already-expanded `tiles` path (parallel to it). The
 ## start tile (index 0) is always legal — the unit is standing on it. Walking outward, a
 ## step stays legal only while every prior step was legal AND: its index (== cumulative

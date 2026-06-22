@@ -17,6 +17,11 @@
 class_name Unit
 extends Node3D
 
+## Emitted when a walk started by `move_along` reaches its last point and the unit goes
+## idle. Carries the unit itself so a listener bound to several units can tell them apart.
+## The enemy AI uses this to end an enemy's turn only *after* it finishes stepping there.
+signal move_finished(unit: Unit)
+
 ## The two sides. Body color reads allegiance, independent of class — so a player
 ## archer and an enemy archer share a hat but differ in body color.
 enum Allegiance {
@@ -77,6 +82,14 @@ var current_mp: int = 0
 ## templates. Tracked + displayed only for now; spending it on a level-up is wired when
 ## the leveling system lands (see `level_up`).
 var current_exp: int = 0
+
+## Charge Time — the FFT-style initiative counter `TurnManager` ticks up by this unit's
+## `speed` each beat; at `CT_THRESHOLD` the unit takes its turn, then `CT_THRESHOLD` is
+## subtracted (excess carries over), so faster units act *more often*. Like `current_exp`
+## this is mutable per-unit progress, deliberately NOT a `StatBlock` field — `speed` (the
+## charge rate) is the class-derived stat; `ct` (the accumulated charge) is live state. The
+## scheduler owns it; it lives here so it travels with the unit.
+var ct: int = 0
 
 # --- Movement (visual glide between tiles) -----------------------------------
 
@@ -141,6 +154,9 @@ func _process(delta: float) -> void:
 	if _move_queue.is_empty():
 		_is_moving = false
 		set_process(false)
+		# Announce arrival so turn/AI code can react (e.g. end an enemy's turn) without
+		# polling `is_moving()` every frame.
+		move_finished.emit(self)
 		return
 	var target: Vector3 = _move_queue[0]
 	position = position.move_toward(target, MOVE_SPEED * delta)
@@ -248,12 +264,12 @@ func _aptitude() -> StatBlock:
 	return StatBlock.new()
 
 
-## One-line stat summary for debug prints: who, class, level, experience, and the block.
+## One-line stat summary for debug prints: who, class, level, experience, charge, and block.
 func stats_summary() -> String:
 	var block: String = max_stats.describe() if max_stats != null else "(no stats)"
-	return "%s — L%d %s (EXP %d/%d): %s" % [
+	return "%s — L%d %s (EXP %d/%d, CT %d/%d): %s" % [
 		display_name(), level, UnitClasses.display_name(unit_class),
-		current_exp, EXP_PER_LEVEL, block,
+		current_exp, EXP_PER_LEVEL, ct, TurnManager.CT_THRESHOLD, block,
 	]
 
 
@@ -271,11 +287,13 @@ func stats_panel_text() -> String:
 	if max_stats == null:
 		return "%s\n(no stats)" % display_name()
 	var s := max_stats
-	return "%s — L%d %s\nEXP %d/%d\nHP %d/%d   MP %d/%d\nMOV %d  JMP %d  SPD %d\nPATK %d  MATK %d\nPDEF %d  MDEF %d" % [
+	# CT (Charge Time) is live initiative progress, shown beside SPD (its charge rate) as
+	# current/threshold — TurnManager.CT_THRESHOLD is the bar a unit fills to take its turn.
+	return "%s — L%d %s\nEXP %d/%d\nHP %d/%d   MP %d/%d\nMOV %d  JMP %d  SPD %d  CT %d/%d\nPATK %d  MATK %d\nPDEF %d  MDEF %d" % [
 		display_name(), level, UnitClasses.display_name(unit_class),
 		current_exp, EXP_PER_LEVEL,
 		current_hp, s.max_hp, current_mp, s.max_mp,
-		s.move, s.jump, s.speed,
+		s.move, s.jump, s.speed, ct, TurnManager.CT_THRESHOLD,
 		s.phys_atk, s.mag_atk, s.phys_def, s.mag_def,
 	]
 

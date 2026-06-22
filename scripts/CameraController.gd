@@ -12,6 +12,11 @@
 ##   - Mouse wheel        : zoom in / out
 ##   - Q / E              : orbit left / right
 ##   - Middle-mouse drag  : free orbit (yaw + pitch)
+##
+## The look-at `target` can be slewed to follow the active unit via `focus_on` (see Main):
+## only the target moves, so the isometric angle and zoom are preserved — the view just
+## glides to re-center on whoever's turn it is.
+class_name CameraController
 extends Camera3D
 
 # --- Tunables (editable in the Inspector) ------------------------------------
@@ -43,6 +48,14 @@ extends Camera3D
 ## Orthographic size change per mouse-wheel notch.
 @export var zoom_step: float = 3.0
 
+## How quickly the camera slews toward a new `focus_on` target. Used as the per-second rate
+## of an exponential ease (higher = snappier); the actual lerp factor is `follow_speed *
+## delta`, clamped to 1, so it's frame-rate independent. Because Main feeds the active unit's
+## *live* position, this also sets how far the camera trails a walking unit: the steady-state
+## lag is roughly `Unit.MOVE_SPEED / follow_speed` world units, so ~1.5 tiles here — a gentle
+## "panning to keep up" feel. Lower it for more lag, raise it to hug the unit more tightly.
+@export var follow_speed: float = 4.0
+
 ## Clamps so you can't zoom through the world or flip the camera over the poles.
 @export var min_ortho_size: float = 6.0
 @export var max_ortho_size: float = 90.0
@@ -54,11 +67,23 @@ extends Camera3D
 ## True while the middle mouse button is held (free-orbit drag in progress).
 var _orbiting: bool = false
 
+## Where the camera is gliding toward — the look-at point `_process` eases `target` into.
+## Starts at the authored `target` (no motion until `focus_on` is called).
+var _desired_target: Vector3 = Vector3.ZERO
+
 
 ## Force orthographic projection and place the camera for the first time.
 func _ready() -> void:
 	projection = PROJECTION_ORTHOGONAL
+	_desired_target = target
 	_update_transform()
+
+
+## Slew the view to center on `point`, keeping the current angle and zoom (only the look-at
+## target moves). Main calls this with the active unit's tile each frame; the actual glide
+## happens in `_process`, so repeated calls with the same point are free.
+func focus_on(point: Vector3) -> void:
+	_desired_target = point
 
 
 ## Handle discrete events: wheel zoom, and starting/ending a middle-mouse orbit
@@ -79,8 +104,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		_update_transform()
 
 
-## Handle held keys for smooth, frame-rate-independent orbiting with Q / E.
+## Per-frame updates: held-key orbiting (Q / E) and easing `target` toward the focus set by
+## `focus_on`. Both only refresh the transform when something actually changed, so an idle
+## camera does no work.
 func _process(delta: float) -> void:
+	var changed: bool = false
+
 	var turn: float = 0.0
 	if Input.is_physical_key_pressed(KEY_Q):
 		turn += key_orbit_speed * delta
@@ -88,6 +117,18 @@ func _process(delta: float) -> void:
 		turn -= key_orbit_speed * delta
 	if turn != 0.0:
 		yaw += turn
+		changed = true
+
+	# Glide toward the active-unit focus. `lerp` with a clamped `follow_speed * delta` factor
+	# is an exponential ease (fast then settling); snap the last sliver so it fully arrives
+	# and stops refreshing rather than creeping forever.
+	if not target.is_equal_approx(_desired_target):
+		target = target.lerp(_desired_target, clampf(follow_speed * delta, 0.0, 1.0))
+		if target.distance_to(_desired_target) < 0.001:
+			target = _desired_target
+		changed = true
+
+	if changed:
 		_update_transform()
 
 

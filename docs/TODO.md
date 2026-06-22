@@ -63,9 +63,17 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
 ## Next
 
 ### Then
-- [ ] Turn order / turn-based loop — will *set* `_active_unit` from `max_stats.speed`,
-      replacing the temporary Tab cycle. **Do this as the first `TurnManager` extraction**
-      (see the Architecture section) rather than growing the logic inside `Main`.
+- [x] Turn order / turn-based loop — extracted as `TurnManager` (the first split off `Main`,
+      via node composition + signals). FFT-style **Charge Time**: each `Unit` banks `ct`,
+      ticks up by `speed`, acts at 100, carries the overflow — faster units act more often
+      (shown as `CT n/100` on the stat panel). Emits `active_unit_changed` / `turn_ended`;
+      `Main._on_active_unit_changed` reacts. Both sides take real turns. Enemies run the
+      **player's own** move functions (enter move phase → reachable outline → preview the
+      chosen path with `classify_path`/`show_path` → `_perform_move` → end) with
+      `ENEMY_TURN_DELAY` pauses; only `_ai_pick_move` (random reachable tile) is
+      enemy-specific. Added `Battlefield.find_path` (legal BFS route for the AI),
+      `Unit.move_finished`, and a `CameraController.focus_on` slew that follows the active
+      unit. See `docs/DECISION_LOG.md`.
 - [ ] Re-settle units + apply fall damage inside `advance_shift()` (terrain-only today) —
       fall damage should read `max_stats.temporal_resist` (the reserved hook), not a global
 - [ ] Promotion / job-upgrade tree — a separate resource (which class unlocks which, at
