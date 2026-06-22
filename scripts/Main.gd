@@ -45,6 +45,19 @@ const STAT_PANEL_HEIGHT := 2.6
 ## before the move starts (see `_take_enemy_turn`), keeping the flow re-entrancy-free.
 const ENEMY_TURN_DELAY := 0.4
 
+## Battle intro: after the establishing orbit settles, hold this long (seconds) before the
+## first unit becomes active and the camera punches in. See `_ready` / `_on_active_unit_changed`.
+const INTRO_HOLD := 1.0
+
+## How many mouse-wheel notches the intro punches in by on the very first active unit. Only
+## that first activation auto-zooms; after that the player owns the zoom.
+const INTRO_ZOOM_CLICKS := 4
+
+## Map-transition cinematic timing (seconds): how long to hold on the wide map view both
+## before and after the terrain shifts, and how long each zoom-out / zoom-in takes.
+const MAP_TRANSITION_HOLD := 1.0
+const MAP_ZOOM_TIME := 1.0
+
 ## The two input phases of a turn: choosing an action, or placing a move.
 enum Phase { MENU, MOVE }
 
@@ -84,6 +97,9 @@ var _menu: ActionMenu
 ## code in `_ready`.
 var _status_panel: StatusPanel
 
+## The top-right "turns until the map shifts" countdown box. Created in code in `_ready`.
+var _shift_counter: ShiftCounter
+
 ## Which input phase we're in right now (see Phase).
 var _phase: Phase = Phase.MENU
 
@@ -98,6 +114,15 @@ var _turn_manager: TurnManager
 ## move/menu/hover code reads it for convenience; the turn manager remains the source of
 ## truth (this is never written elsewhere).
 var _active_unit: Unit = null
+
+## True once the battle-intro punch-in has fired, so only the *very first* active unit
+## auto-zooms; every activation after that leaves the zoom to the player.
+var _intro_zoom_done: bool = false
+
+## True while the map-transition cinematic is playing. Gates player input and suspends the
+## per-frame camera-follow so the cinematic can own the camera (zoom out → shift → zoom in)
+## without a unit acting or the follow fighting it.
+var _map_transition_playing: bool = false
 
 ## Which unit occupies each tile, keyed by grid coordinate (Vector2i). Lets us block
 ## moving onto an occupied tile now, and will resolve attacks by tile later.
@@ -152,6 +177,9 @@ func _ready() -> void:
 	_status_panel = StatusPanel.new()
 	add_child(_status_panel)          # runs StatusPanel._ready synchronously, building its UI
 
+	_shift_counter = ShiftCounter.new()
+	add_child(_shift_counter)         # runs ShiftCounter._ready synchronously, building its UI
+
 	_rng.seed = 12345          # fixed seed: same rolled enemies every run while testing
 
 	# The turn scheduler owns whose turn it is; we just listen for the hand-off. Built
@@ -159,6 +187,12 @@ func _ready() -> void:
 	_turn_manager = TurnManager.new()
 	add_child(_turn_manager)
 	_turn_manager.active_unit_changed.connect(_on_active_unit_changed)
+	# The map "takes its turn" every N character turns (default 10); we run the actual
+	# time-shift. A specific map would set its own cadence via register_map_transition_speed.
+	_turn_manager.map_transition_due.connect(_on_map_transition_due)
+	_turn_manager.map_transition_countdown.connect(_on_shift_countdown)
+	# Seed the countdown HUD with the starting value (full cadence; -1 hides it if disabled).
+	_shift_counter.set_count(_turn_manager.turns_until_transition())
 
 	# Players from authored recruits; enemies rolled from class+level into recruits.
 	for entry in _player_roster:
@@ -167,8 +201,12 @@ func _ready() -> void:
 		var foe := StatRoll.random_recruit(entry[2], entry[3], _rng)
 		_spawn_recruit(entry[0], entry[1], Unit.Allegiance.ENEMY, foe)
 
-	# Kick off the loop: this charges up to the first actor and emits active_unit_changed,
-	# which lands in _on_active_unit_changed and starts that unit's turn.
+	# Battle intro: a slow establishing orbit from 90° away into the authored angle, a short
+	# hold, THEN start the turn loop. No unit is active during the orbit/hold, so the camera
+	# stays on the wide map shot. `begin()` charges up to the first actor and emits
+	# active_unit_changed, which starts that unit's turn and triggers the one-time punch-in.
+	await _camera.play_intro_orbit()
+	await get_tree().create_timer(INTRO_HOLD).timeout
 	_turn_manager.begin()
 
 
@@ -512,6 +550,11 @@ func _on_active_unit_changed(unit: Unit) -> void:
 		return
 	_menu.set_title(unit.display_name())  # show whose turn it is
 	_update_active_marker()
+	# One-time intro punch-in: the first unit to ever go active gets a zoom-in; after that the
+	# player controls the zoom. The pan onto the unit is the normal `focus_on` slew.
+	if not _intro_zoom_done:
+		_intro_zoom_done = true
+		_camera.zoom_in_steps(INTRO_ZOOM_CLICKS)
 	if unit.allegiance == Unit.Allegiance.PLAYER:
 		_start_turn()
 	else:
@@ -583,6 +626,48 @@ func _on_enemy_move_finished(_unit: Unit) -> void:
 	_turn_manager.end_turn()
 
 
+## The map's turn came up (every N character turns, per the turn manager) — play the
+## transition cinematic, then hand control back so the next unit can act. The turn manager
+## deliberately paused the loop before choosing the next actor, so nothing moves underneath
+## the cinematic; `continue_after_transition` resumes it.
+func _on_map_transition_due() -> void:
+	await _play_map_transition()
+	_turn_manager.continue_after_transition()
+
+
+## The map-transition cinematic: register the current zoom, pull out to the whole-map view,
+## hold, shift the terrain, hold, then zoom back in to the (still-active) unit at the zoom we
+## started from. `_map_transition_playing` gates input and suspends the per-frame camera
+## follow for the duration so the choreography owns the camera.
+func _play_map_transition() -> void:
+	_map_transition_playing = true
+	# Clear the player UI so the wide shot is unobstructed; the next turn restores it.
+	_menu.set_menu_visible(false)
+	_status_panel.hide_panel()
+
+	var restore_zoom: float = _camera.ortho_size   # register where to zoom back to
+	# Pull back to the whole-map framing (recenter on the map; the follow is suspended).
+	_camera.focus_on(Vector3.ZERO)
+	await _camera.zoom_to(_camera.home_ortho_size(), MAP_ZOOM_TIME)
+	await get_tree().create_timer(MAP_TRANSITION_HOLD).timeout
+
+	# The shift itself (terrain only today; unit re-settle + fall damage is a separate TODO).
+	_battlefield.advance_shift()
+	await get_tree().create_timer(MAP_TRANSITION_HOLD).timeout
+
+	# Release the camera so the per-frame follow re-centers on the active unit, and zoom back
+	# in to the registered level as it pans.
+	_map_transition_playing = false
+	await _camera.zoom_to(restore_zoom, MAP_ZOOM_TIME)
+	# Refresh the countdown to the full cadence now that the shift has happened.
+	_shift_counter.set_count(_turn_manager.turns_until_transition())
+
+
+## Update the top-right countdown box when the turn manager reports turns-until-shift.
+func _on_shift_countdown(turns_remaining: int) -> void:
+	_shift_counter.set_count(turns_remaining)
+
+
 ## Place/recolor the active-unit tile marker on the active unit's tile, and aim the camera at
 ## the unit. Called every frame from `_process` so both track the unit as it walks and stay
 ## correct after a time-shift. The marker sits on the destination tile (`grid_coord`, which a
@@ -594,7 +679,10 @@ func _update_active_marker() -> void:
 	if _active_unit == null:
 		return
 	_battlefield.set_active_tile(_active_unit.grid_coord, Unit.active_color(_active_unit.allegiance))
-	_camera.focus_on(_active_unit.global_position)
+	# During a map-transition cinematic the camera is choreographed by `_play_map_transition`,
+	# so don't fight it with the per-frame follow; the marker still tracks the tile.
+	if not _map_transition_playing:
+		_camera.focus_on(_active_unit.global_position)
 
 
 ## Move `unit`'s occupancy entry and grid address to `dest` — the bookkeeping half of a move
@@ -606,7 +694,10 @@ func _relocate_unit(unit: Unit, dest: Vector2i) -> void:
 	_units_by_tile[dest] = unit
 
 
-## True only while a PLAYER unit holds the turn — the gate for all player input (menu keys
-## and move placement), so input does nothing during an enemy's self-driven AI turn.
+## True only while a PLAYER unit holds the turn AND no map-transition cinematic is playing —
+## the gate for all player input (menu keys and move placement), so input does nothing during
+## an enemy's self-driven AI turn or while the map is shifting.
 func _is_player_turn() -> bool:
-	return _active_unit != null and _active_unit.allegiance == Unit.Allegiance.PLAYER
+	return _active_unit != null \
+		and _active_unit.allegiance == Unit.Allegiance.PLAYER \
+		and not _map_transition_playing

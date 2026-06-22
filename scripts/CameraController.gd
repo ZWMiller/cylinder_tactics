@@ -48,6 +48,19 @@ extends Camera3D
 ## Orthographic size change per mouse-wheel notch.
 @export var zoom_step: float = 3.0
 
+## Seconds the one-time battle-intro punch-in (`zoom_in_steps`) takes to ease its zoom. Only
+## the intro animates the zoom; ordinary wheel zoom stays instant.
+@export var intro_zoom_time: float = 1.0
+
+## How far (degrees of azimuth) the intro establishing orbit starts away from the authored
+## yaw — 90° views the map from a neighbouring corner before swinging in. Flip the sign to
+## orbit in from the other side.
+@export var intro_orbit_degrees: float = 90.0
+
+## Seconds the intro establishing orbit takes to swing from `intro_orbit_degrees` away back to
+## the authored yaw. "Reasonably slow" so it reads as a camera move, not a snap.
+@export var intro_orbit_time: float = 3.0
+
 ## How quickly the camera slews toward a new `focus_on` target. Used as the per-second rate
 ## of an exponential ease (higher = snappier); the actual lerp factor is `follow_speed *
 ## delta`, clamped to 1, so it's frame-rate independent. Because Main feeds the active unit's
@@ -71,12 +84,23 @@ var _orbiting: bool = false
 ## Starts at the authored `target` (no motion until `focus_on` is called).
 var _desired_target: Vector3 = Vector3.ZERO
 
+## The authored opening zoom (orthographic `size`), captured before any zoom changes. This is
+## the "whole map in view" framing the map-transition cinematic zooms out to.
+var _home_ortho_size: float = 0.0
+
 
 ## Force orthographic projection and place the camera for the first time.
 func _ready() -> void:
 	projection = PROJECTION_ORTHOGONAL
 	_desired_target = target
+	_home_ortho_size = ortho_size
 	_update_transform()
+
+
+## The authored opening zoom — the framing that shows the whole map (used by the
+## map-transition cinematic's zoom-out). See `_home_ortho_size`.
+func home_ortho_size() -> float:
+	return _home_ortho_size
 
 
 ## Slew the view to center on `point`, keeping the current angle and zoom (only the look-at
@@ -135,6 +159,61 @@ func _process(delta: float) -> void:
 ## Apply a zoom delta to the orthographic size, clamped, then refresh.
 func _zoom(amount: float) -> void:
 	ortho_size = clampf(ortho_size + amount, min_ortho_size, max_ortho_size)
+	_update_transform()
+
+
+## Smoothly zoom IN by `notches` mouse-wheel notches (each `zoom_step` of orthographic size),
+## eased over `intro_zoom_time`. Used once for the battle-intro punch-in on the first active
+## unit; ordinary wheel zoom (`_zoom`) stays instant. Clamped to the same limits as manual zoom.
+func zoom_in_steps(notches: int) -> void:
+	var goal: float = clampf(ortho_size - notches * zoom_step, min_ortho_size, max_ortho_size)
+	# A Tween drives the zoom over time; `tween_method` feeds each interpolated value to the
+	# setter below, which keeps the live camera `size` in lockstep with `ortho_size`.
+	var tween := create_tween()
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_OUT)
+	tween.tween_method(_apply_ortho_size, ortho_size, goal, intro_zoom_time)
+
+
+## Smoothly zoom to an absolute orthographic `target_size` over `duration` seconds, clamped to
+## the zoom limits. Awaitable — returns when the zoom settles, so a caller (the map-transition
+## cinematic) can sequence zoom-out → hold → shift → hold → zoom-in.
+func zoom_to(target_size: float, duration: float) -> void:
+	var goal: float = clampf(target_size, min_ortho_size, max_ortho_size)
+	var tween := create_tween()
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_IN_OUT)
+	tween.tween_method(_apply_ortho_size, ortho_size, goal, duration)
+	await tween.finished
+
+
+## Set the orthographic zoom level on both the rig (`ortho_size`) and the live camera
+## (`size`). A method so a Tween can animate the zoom (see `zoom_in_steps` / `zoom_to`);
+## `_process`'s `_update_transform` likewise reads `ortho_size`, so they stay consistent.
+func _apply_ortho_size(value: float) -> void:
+	ortho_size = value
+	size = value
+
+
+## Cinematic intro: snap the azimuth `intro_orbit_degrees` away from the authored yaw, then
+## ease it back over `intro_orbit_time` — an establishing orbit from a neighbouring corner.
+## `await` this from Main (`_ready`); it returns when the orbit has settled. The snap happens
+## synchronously (before the first frame renders), so the opening shot is already off-angle.
+func play_intro_orbit() -> void:
+	var end_yaw: float = yaw
+	yaw = end_yaw + intro_orbit_degrees
+	_update_transform()
+	var tween := create_tween()
+	tween.set_trans(Tween.TRANS_SINE)
+	tween.set_ease(Tween.EASE_IN_OUT)   # ease both ends so it glides off and settles gently
+	tween.tween_method(_apply_yaw, yaw, end_yaw, intro_orbit_time)
+	await tween.finished
+
+
+## Set the orbit azimuth and refresh the transform. A method so the intro Tween can animate
+## `yaw` (see `play_intro_orbit`).
+func _apply_yaw(value: float) -> void:
+	yaw = value
 	_update_transform()
 
 
