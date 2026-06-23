@@ -342,3 +342,65 @@ damage-modifier / status hooks. Treat this as a headline feature, not a side sys
   content black hole. Build the tree to *support* branches but **author one linear act first**.
 - Meta layer (cross-run unlocks/upgrades) — needed at all with a persistent party, or does
   between-battle loot cover it?
+
+---
+
+## 10. Art direction — target look (watercolor + ink) — Later
+
+**Status: Later / direction set, not built.** §7 is the *prototype* look (geometry + flat
+color). This is the **target aesthetic** once we move past placeholder art: a **hand-drawn
+watercolor-and-ink storybook** style, with the map *assembling itself on screen* as a
+signature load moment. Captured now so the move to sprites/textures (and the engine choices
+that enable it) is made with this end-state in mind, not retrofitted.
+
+**The look.** Everything reads as **paint and ink on paper**: loose hand-drawn ink outlines,
+soft watercolor washes (irregular edges, pigment pooling darker at the borders, color
+variation within a wash), all unified by a **paper-grain overlay** multiplied over the whole
+screen — map, units, and UI alike. Units become **watercolor sprites** (see the 2.5D /
+sprite notes: billboarded 2D sprites in the 3D world) painted in the same medium.
+
+**The signature load sequence ("the map draws itself in").** A battle loads as if being
+sketched and painted onto graph paper:
+1. **Graph paper** background.
+2. The map's tile **outlines scribble in** — loose, *boiling* (frame-to-frame jittering)
+   pencil lines that animate as if being drawn.
+3. **Color floods in** — watercolor washes bleed into the tiles (an organic, noise-edged
+   "pigment spreading on wet paper" reveal, not a hard wipe).
+4. The graph paper **crossfades to a scenic watercolor backdrop** (sky / mountains / sunset),
+   chosen per battle.
+5. **Sprites appear** in the same painted vocabulary.
+
+**Why it fits this project.** The map is already generated **from data, tile by tile, in
+code** (§8), so we own the reveal order and timing — the "draw-in" is choreography layered on
+the existing generator, using the same sequencing patterns as the shift cinematic. **Reuse
+candidate:** the *same* scribble-and-recolor effect could fire on the **time-shift** (§4) —
+the decaying world being literally *re-sketched* — tying the core gimmick to the art language.
+Build the reveal as a reusable "(re)draw these tiles" routine, not a one-off intro.
+
+**Effects, by difficulty (de-risk in this order):**
+- *Easy / high payoff:* flat watercolor tile textures + the paper-grain overlay + **unshaded**
+  rendering — nail the *static* look first.
+- *Easy:* graph-paper → scenic backdrop crossfade (per-battle backdrop is `Encounter` data).
+- *Medium:* the color flood-in (a noise-masked dissolve tuned to look like bleeding pigment),
+  driven by the per-tile generation timing.
+- *Hard / the ambitious flourish, prototype cheaply first:* the **scribbled, boiling, draw-on
+  pencil outline** (wobbly stroke texture + time-varying noise "boil" + a draw-on reveal). This
+  is where most iteration goes; prove the rest sells the direction before committing to it.
+
+**Decisions this locks in (consequences for §7's successor):**
+- **Unshaded / flat**, not lit 3D — watercolor reads as paint on paper, so the directional
+  light + shadows get dropped or heavily stylized.
+- **Ink outlines on everything** (units *and* terrain) or the look is half-committed.
+- **Limited, harmonious palette per scene** (sunset warm, mountain cool, …).
+- Keep terrain materials/shaders **shared per terrain type** across the ~hundreds of tiles
+  (performance), unlike units which stay per-instance (independent skinning, §7).
+
+**Open questions (defer):**
+- The load sequence plays **every battle** — make it **skippable / fast-forward to finished**
+  after first view (tactics intros wear out fast). Decide total duration and the reveal
+  choreography (radiate from a point? sweep? scattered "raindrops" of color?).
+- Pixel-art vs. painterly-hi-res (drives texture filtering, texel density tied to the ortho
+  `size`, and how much continuous unit movement shimmers — see the sprite/texture notes).
+- Whether the shift truly reuses the draw-in effect, or just shares its visual vocabulary.
+- Treatment of UI/HUD and the existing overlays (move-range outline, damage numbers,
+  win/lose screen) in the painted style so they don't read as a different medium.
