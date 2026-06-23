@@ -80,6 +80,13 @@ extends Camera3D
 ## True while the middle mouse button is held (free-orbit drag in progress).
 var _orbiting: bool = false
 
+## True once the battle is won: the camera then orbits the map forever at `victory_orbit_speed`
+## (see `start_victory_orbit`), independent of input — the slow celebratory pan under the win screen.
+var _victory_orbit: bool = false
+
+## Degrees per second of the indefinite victory orbit. Slow, so it reads as a stately fly-around.
+@export var victory_orbit_speed: float = 10.0
+
 ## Where the camera is gliding toward — the look-at point `_process` eases `target` into.
 ## Starts at the authored `target` (no motion until `focus_on` is called).
 var _desired_target: Vector3 = Vector3.ZERO
@@ -139,6 +146,9 @@ func _process(delta: float) -> void:
 		turn += key_orbit_speed * delta
 	if Input.is_physical_key_pressed(KEY_E):
 		turn -= key_orbit_speed * delta
+	# The victory orbit adds a steady spin on top of (or instead of) any key orbit.
+	if _victory_orbit:
+		turn += victory_orbit_speed * delta
 	if turn != 0.0:
 		yaw += turn
 		changed = true
@@ -208,6 +218,12 @@ func play_intro_orbit() -> void:
 	tween.set_ease(Tween.EASE_IN_OUT)   # ease both ends so it glides off and settles gently
 	tween.tween_method(_apply_yaw, yaw, end_yaw, intro_orbit_time)
 	await tween.finished
+
+
+## Begin the indefinite victory orbit — a slow, forever spin around the map (`_process` advances
+## the yaw each frame). Call after pulling back to the whole-map framing; `Main` does this on a win.
+func start_victory_orbit() -> void:
+	_victory_orbit = true
 
 
 ## Set the orbit azimuth and refresh the transform. A method so the intro Tween can animate

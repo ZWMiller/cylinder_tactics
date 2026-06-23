@@ -19,6 +19,10 @@ extends CanvasLayer
 const _NORMAL_COLOR := Color(0.78, 0.78, 0.82)
 const _HIGHLIGHT_COLOR := Color(1.0, 0.9, 0.4)
 
+## Greyed color for an option that can't be chosen right now (e.g. Attack after the unit already
+## acted this turn). Matches the spell menu's disabled grey so the two read consistently.
+const _DISABLED_COLOR := Color(0.5, 0.5, 0.55)
+
 ## Size/spacing knobs, pulled out so the menu is easy to retune in one place. Sized
 ## up ~4x from the first pass so it reads as a deliberate HUD, not a tooltip.
 const _FONT_SIZE := 40           ## Option text height in px.
@@ -34,6 +38,10 @@ const _TITLE_COLOR := Color(0.95, 0.95, 1.0)
 ## Full-screen, click-through root. We toggle its visibility to show/hide the menu.
 var _root: Control
 
+## The bordered box; kept as a field so a nested submenu can read its on-screen rect and dock to
+## the right of it (see `panel_rect` / `SpellMenu.open_beside`).
+var _panel: PanelContainer
+
 ## Heading line showing whose turn it is (the active unit's name).
 var _title: Label
 
@@ -43,6 +51,12 @@ var _list: VBoxContainer
 ## The option strings and their Labels, kept index-aligned.
 var _options: Array = []
 var _labels: Array[Label] = []
+
+## The currently highlighted index and the per-option enabled flags (index-aligned with
+## `_options`; an out-of-range / missing entry is treated as enabled). Both feed `_render`, which is
+## the single place label text + color is decided so highlight and enabled state never disagree.
+var _highlighted: int = 0
+var _enabled: Array = []
 
 
 ## Godot lifecycle hook: build the (static) UI tree once when the layer enters the
@@ -58,28 +72,28 @@ func _ready() -> void:
 	# Translucent black box pinned to the bottom-left corner. The grow directions
 	# make it expand up and to the right as it sizes to its contents, so it hugs the
 	# corner regardless of how many options there are.
-	var panel := PanelContainer.new()
-	panel.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
-	panel.offset_left = _SCREEN_MARGIN     # margin in from the left edge
-	panel.offset_bottom = -_SCREEN_MARGIN  # margin up from the bottom edge
-	panel.grow_horizontal = Control.GROW_DIRECTION_END
-	panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_panel = PanelContainer.new()
+	_panel.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
+	_panel.offset_left = _SCREEN_MARGIN     # margin in from the left edge
+	_panel.offset_bottom = -_SCREEN_MARGIN  # margin up from the bottom edge
+	_panel.grow_horizontal = Control.GROW_DIRECTION_END
+	_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	# A PanelContainer's background is a theme "panel" StyleBox; override it with a
 	# flat translucent-black box, interior padding, and slightly rounded corners.
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.0, 0.0, 0.0, 0.5)
 	style.set_content_margin_all(_PADDING)
 	style.set_corner_radius_all(_CORNER_RADIUS)
-	panel.add_theme_stylebox_override("panel", style)
-	_root.add_child(panel)
+	_panel.add_theme_stylebox_override("panel", style)
+	_root.add_child(_panel)
 
 	# A single column inside the panel: the title heading on top, the option list
 	# below it. Wrapping them lets the panel size to both together.
 	var content := VBoxContainer.new()
 	content.add_theme_constant_override("separation", _ITEM_SEPARATION)
 	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	panel.add_child(content)
+	_panel.add_child(content)
 
 	# Title: the active unit's name. Built once here; its text is set by set_title.
 	_title = Label.new()
@@ -107,14 +121,42 @@ func build(options: Array) -> void:
 		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		_list.add_child(label)
 		_labels.append(label)
+	# A fresh menu starts with everything enabled until `set_enabled` says otherwise.
+	_enabled = []
+	for _o in _options:
+		_enabled.append(true)
 
 
-## Visually mark option `index` as highlighted (arrow + bright color); dim the rest.
+## Set which option is highlighted (arrow + bright color), then re-render.
 func set_highlighted(index: int) -> void:
+	_highlighted = index
+	_render()
+
+
+## Set the per-option enabled flags (index-aligned with the options); disabled options render
+## greyed. `Main` decides these from the per-turn action limit and refuses to activate a disabled
+## option. Re-renders so the change shows immediately.
+func set_enabled(enabled: Array) -> void:
+	_enabled = enabled.duplicate()
+	_render()
+
+
+## Render every row from the current highlight + enabled state — the single source of label text and
+## color. Disabled wins over highlighted (a greyed option still shows the arrow if it's the cursor,
+## but stays grey), so the player can see what's selected without it looking choosable.
+func _render() -> void:
 	for i in _labels.size():
-		var selected: bool = i == index
+		var selected: bool = i == _highlighted
+		var is_enabled: bool = i >= _enabled.size() or _enabled[i]
+		var color: Color
+		if not is_enabled:
+			color = _DISABLED_COLOR
+		elif selected:
+			color = _HIGHLIGHT_COLOR
+		else:
+			color = _NORMAL_COLOR
 		_labels[i].text = ("> " if selected else "   ") + str(_options[i])
-		_labels[i].add_theme_color_override("font_color", _HIGHLIGHT_COLOR if selected else _NORMAL_COLOR)
+		_labels[i].add_theme_color_override("font_color", color)
 
 
 ## Set the heading text — the active unit's name, shown above the options so the
@@ -126,3 +168,9 @@ func set_title(text: String) -> void:
 ## Show or hide the whole menu (used when entering / leaving the menu phase).
 func set_menu_visible(value: bool) -> void:
 	_root.visible = value
+
+
+## This menu's box on screen (global Control rect), so a nested submenu can dock to the right of it
+## (see `SpellMenu.open_beside`). Valid once the menu is visible and laid out.
+func panel_rect() -> Rect2:
+	return _panel.get_global_rect()

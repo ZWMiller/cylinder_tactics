@@ -29,10 +29,16 @@ const RECRUIT_BRON := preload("res://assets/recruits/bron.tres")  # Soldier
 const RECRUIT_DART := preload("res://assets/recruits/dart.tres")  # Archer
 const RECRUIT_WISP := preload("res://assets/recruits/wisp.tres")  # Mage
 
-## The actions offered at the start of a turn, in menu order. "Attack" enters the targeting
-## phase (orange reach overlay; click an enemy in range to strike). "Stats" inspects the
-## active unit (prints its block + pins the floating panel) so the stat system is verifiable.
-const MENU_OPTIONS := ["Move", "Attack", "Stats", "End Turn"]
+## The actions offered at the start of a turn, in menu order. "Attack" enters the targeting phase
+## (orange reach overlay; click an enemy in range to strike) with the unit's basic weapon attack.
+## "Spell" opens the nested spell submenu, but ONLY for casters — so the menu is built per active
+## unit (see `_menu_options_for`), not from a single fixed list. "Stats" inspects the active unit
+## (prints its block + pins the floating panel) so the stat system is verifiable.
+const _ACTION_MOVE := "Move"
+const _ACTION_ATTACK := "Attack"
+const _ACTION_SPELL := "Spell"
+const _ACTION_STATS := "Stats"
+const _ACTION_END := "End Turn"
 
 ## How long (seconds) the cursor must rest on a unit before its stat panel pops up.
 const HOVER_DELAY := 1.0
@@ -64,8 +70,9 @@ const DAMAGE_NUMBER_HEIGHT := 1.8
 ## Color of the floating damage number (a soft red so it reads as "ouch" against the terrain).
 const DAMAGE_NUMBER_COLOR := Color(1.0, 0.5, 0.45)
 
-## The input phases of a turn: choosing an action, placing a move, or aiming an attack.
-enum Phase { MENU, MOVE, ATTACK }
+## The input phases of a turn: choosing an action, browsing the spell submenu, placing a move, or
+## aiming an attack. SPELL_MENU is a sub-state of the menu (the action menu stays visible beside it).
+enum Phase { MENU, SPELL_MENU, MOVE, ATTACK }
 
 ## Authored player units: [grid_x, grid_z, Recruit]. Each spawns via
 ## `Unit.init_from_recruit`, so it carries a real class, level, aptitude and stat
@@ -78,11 +85,12 @@ enum Phase { MENU, MOVE, ATTACK }
 
 ## Enemy units: [grid_x, grid_z, class, level]. Unlike PCs these have no authored
 ## file — each is rolled into a random `Recruit` (random name + aptitude) at the given
-## class/level by `StatRoll`. Level 3 so banked level-up growth is visible in-game.
+## class/level by `StatRoll`. Level 1 (matching the PCs) for a fair test fight while the
+## combat AI is shaken out; bump for a tougher encounter later.
 @onready var _enemy_roster := [
-	[10, 13, UnitClasses.Class.SOLDIER, 3],
-	[12, 13, UnitClasses.Class.ARCHER, 3],
-	[14, 13, UnitClasses.Class.MAGE, 3],
+	[10, 13, UnitClasses.Class.SOLDIER, 1],
+	[12, 13, UnitClasses.Class.ARCHER, 1],
+	[14, 13, UnitClasses.Class.MAGE, 1],
 ]
 
 ## RNG for rolling enemies. Fixed seed (not `randomize()`) for now so each run spawns
@@ -99,6 +107,10 @@ var _rng := RandomNumberGenerator.new()
 ## The bottom-left action HUD. Created in code in `_ready`.
 var _menu: ActionMenu
 
+## The nested spell submenu, docked to the right of the action menu when a caster picks "Spell".
+## Created in code in `_ready`.
+var _spell_menu: SpellMenu
+
 ## The bottom-right active-unit status box, shown during the menu phase. Created in
 ## code in `_ready`.
 var _status_panel: StatusPanel
@@ -106,11 +118,38 @@ var _status_panel: StatusPanel
 ## The top-right "turns until the map shifts" countdown box. Created in code in `_ready`.
 var _shift_counter: ShiftCounter
 
+## The full-screen win/lose overlay, shown once one side is wiped out. Created in code in `_ready`.
+var _end_screen: EndScreen
+
+## True once the battle has been decided (one side wiped). Latches the end sequence: it gates all
+## turn/input/process work so the loop halts and the camera/overlay own the screen.
+var _game_over: bool = false
+
 ## Which input phase we're in right now (see Phase).
 var _phase: Phase = Phase.MENU
 
-## Which menu option is highlighted (index into MENU_OPTIONS).
+## The action-menu options for the CURRENT active unit, built per turn by `_menu_options_for`
+## (casters get a "Spell" entry, others don't). Indexed by `_menu_index`.
+var _menu_options: Array = []
+
+## Which menu option is highlighted (index into `_menu_options`).
 var _menu_index: int = 0
+
+## Which spell row is highlighted while in the SPELL_MENU phase (index into the active unit's
+## `known_spells`). Stale outside that phase.
+var _spell_index: int = 0
+
+## Per-turn action budget: a unit may commit up to this many actions per turn, of which at most one
+## may be an attack/spell. So a turn is two moves, or a move + one attack/spell (either order) — see
+## `_is_action_enabled`. Only COMMITTED actions count (cancelling out of targeting doesn't); Stats
+## and End Turn are free.
+const MAX_ACTIONS_PER_TURN := 2
+
+## How many actions the active unit has committed this turn, and whether one of them was an
+## attack/spell. Reset at the start of each unit's turn (`_on_active_unit_changed`); bumped by the
+## move and attack commits. Drive which menu options are enabled.
+var _actions_taken: int = 0
+var _offensive_taken: bool = false
 
 ## The turn scheduler that decides whose turn it is (speed/CT order). Created in `_ready`,
 ## the same code-instantiated pattern as the HUD panels. The owner of turn state.
@@ -153,7 +192,7 @@ var _reachable: Dictionary = {}
 var _move_solid: Dictionary = {}
 var _move_occupied: Dictionary = {}
 
-## The attack being aimed during the ATTACK phase (the active unit's `physical_attack` for now),
+## The attack being aimed during the ATTACK phase (the active unit's `basic_attack` for now),
 ## and the set of tiles it can reach `{ Vector2i: true }` — snapshotted when the phase opens so
 ## the click handler can validate a target in O(1). Both stale outside the ATTACK phase.
 var _attack_profile: Attack = null
@@ -185,7 +224,10 @@ var _stats_pinned: bool = false
 func _ready() -> void:
 	_menu = ActionMenu.new()
 	add_child(_menu)            # runs ActionMenu._ready synchronously, building its UI
-	_menu.build(MENU_OPTIONS)
+	# Options are built per active unit (casters get "Spell"), so we don't build a fixed list here.
+
+	_spell_menu = SpellMenu.new()
+	add_child(_spell_menu)      # runs SpellMenu._ready synchronously, building its UI
 
 	_stat_panel = StatPanel.new()
 	add_child(_stat_panel)            # runs StatPanel._ready synchronously, building its UI
@@ -195,6 +237,9 @@ func _ready() -> void:
 
 	_shift_counter = ShiftCounter.new()
 	add_child(_shift_counter)         # runs ShiftCounter._ready synchronously, building its UI
+
+	_end_screen = EndScreen.new()
+	add_child(_end_screen)            # runs EndScreen._ready synchronously, building its UI (hidden)
 
 	_rng.seed = 12345          # fixed seed: same rolled enemies every run while testing
 
@@ -231,6 +276,10 @@ func _ready() -> void:
 ## follows whichever unit it's bound to. When the "Stats" option has pinned the panel,
 ## hover detection is skipped so the pin sticks.
 func _process(delta: float) -> void:
+	# Once the battle is decided, the end cinematic owns the camera/screen — stop the marker,
+	# camera-follow, and hover-inspect work so nothing fights it.
+	if _game_over:
+		return
 	# Keep the active-unit tile marker glued to the active unit's tile (it walks; the
 	# map can shift) — independent of the stat-panel logic below.
 	_update_active_marker()
@@ -265,14 +314,29 @@ func _process(delta: float) -> void:
 ## the menu keys during MENU phase and consume just those, leaving other input (mouse, camera)
 ## to flow normally. The debug time-shift key is handled up front so it works in any phase.
 func _input(event: InputEvent) -> void:
+	# Battle decided → ignore all gameplay input (the end screen is up); camera input still flows
+	# through CameraController's own handler.
+	if _game_over:
+		return
 	# Debug: T manually plays the map-shift cinematic to preview the terrain cycle. Handled
 	# before the menu gate so it works regardless of phase; `_debug_request_shift` guards it.
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_T:
 		_debug_request_shift()
 		get_viewport().set_input_as_handled()
 		return
-	if not _is_player_turn() or _phase != Phase.MENU:
+	if not _is_player_turn():
 		return
+	# Keyboard-driven menu phases handle their navigation here (and consume it); the pointer-driven
+	# MOVE/ATTACK phases fall through to `_unhandled_input`.
+	match _phase:
+		Phase.MENU:
+			_menu_key_input(event)
+		Phase.SPELL_MENU:
+			_spell_menu_key_input(event)
+
+
+## Action-menu navigation: Up/Down move the highlight, Enter activates. Consumes the keys it uses.
+func _menu_key_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_up"):
 		_set_menu_index(_menu_index - 1)
 		get_viewport().set_input_as_handled()
@@ -281,6 +345,23 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("ui_accept"):
 		_activate_menu_option()
+		get_viewport().set_input_as_handled()
+
+
+## Spell-submenu navigation: Up/Down move the highlight, Enter casts (or flashes "Not Enough MP"),
+## and Left/Esc back out to the parent action menu — the nesting convention. Consumes its keys.
+func _spell_menu_key_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_up"):
+		_set_spell_index(_spell_index - 1)
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("ui_down"):
+		_set_spell_index(_spell_index + 1)
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("ui_accept"):
+		_activate_spell_option()
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("ui_cancel") or event.is_action_pressed("ui_left"):
+		_exit_spell_menu()
 		get_viewport().set_input_as_handled()
 
 
@@ -302,22 +383,128 @@ func _unhandled_input(event: InputEvent) -> void:
 ## Set the highlighted option, wrapping around the ends, and update the HUD. Moving
 ## the highlight also dismisses a pinned stats panel — navigating away closes it.
 func _set_menu_index(index: int) -> void:
-	_menu_index = wrapi(index, 0, MENU_OPTIONS.size())  # wrapi keeps it in [0, size)
+	_menu_index = wrapi(index, 0, _menu_options.size())  # wrapi keeps it in [0, size)
 	_menu.set_highlighted(_menu_index)
 	_unpin_stats()
 
 
-## Run the highlighted option: enter move mode, inspect stats, or end the turn.
+## The action-menu options for `unit`, in order. "Spell" appears only for casters (so the menu is
+## per-unit, not a fixed list); everything else is universal. Built fresh each turn by
+## `_on_active_unit_changed`.
+func _menu_options_for(unit: Unit) -> Array:
+	var options := [_ACTION_MOVE, _ACTION_ATTACK]
+	if unit.has_spells():
+		options.append(_ACTION_SPELL)
+	options.append(_ACTION_STATS)
+	options.append(_ACTION_END)
+	return options
+
+
+## Whether `action` can be chosen right now, given the per-turn budget (see MAX_ACTIONS_PER_TURN):
+## Move needs an unused action slot; Attack/Spell need a slot AND that no attack/spell was already
+## used this turn; Stats and End Turn are always free. This is both the gate for activation and the
+## source of the menu's greying, so what's greyed is exactly what's refused.
+func _is_action_enabled(action: String) -> bool:
+	match action:
+		_ACTION_MOVE:
+			return _actions_taken < MAX_ACTIONS_PER_TURN
+		_ACTION_ATTACK, _ACTION_SPELL:
+			return _actions_taken < MAX_ACTIONS_PER_TURN and not _offensive_taken
+		_:
+			return true   # Stats / End Turn never count against the budget
+
+
+## Push the current enabled/disabled state of every menu option to the HUD (greys what
+## `_is_action_enabled` refuses). Called whenever the budget might have changed — turn start and
+## after each committed action.
+func _refresh_menu_enabled() -> void:
+	var states: Array = []
+	for option in _menu_options:
+		states.append(_is_action_enabled(option))
+	_menu.set_enabled(states)
+
+
+## The first option the cursor may legally rest on (first enabled) — used after a commit so the
+## highlight doesn't land on a freshly-greyed option. Stats/End Turn are always enabled, so this
+## always finds one; falls back to 0 defensively.
+func _first_enabled_index() -> int:
+	for i in _menu_options.size():
+		if _is_action_enabled(_menu_options[i]):
+			return i
+	return 0
+
+
+## Run the highlighted option: move, basic attack, open the spell submenu, inspect stats, or end
+## the turn. "Attack" aims the unit's weapon attack; "Spell" defers the profile choice to the
+## submenu (each spell is its own `Attack`). A disabled (greyed) option is a no-op — the budget
+## already spent it.
 func _activate_menu_option() -> void:
-	match MENU_OPTIONS[_menu_index]:
-		"Move":
+	var action: String = _menu_options[_menu_index]
+	if not _is_action_enabled(action):
+		return
+	match action:
+		_ACTION_MOVE:
 			_enter_move_phase()
-		"Attack":
-			_enter_attack_phase()
-		"Stats":
+		_ACTION_ATTACK:
+			_enter_attack_phase(_active_unit.basic_attack())
+		_ACTION_SPELL:
+			_enter_spell_menu()
+		_ACTION_STATS:
 			_inspect_active_unit()
-		"End Turn":
+		_ACTION_END:
 			_turn_manager.end_turn()
+
+
+# --- Spell submenu (nested off the action menu) ------------------------------
+
+## Open the spell submenu: stay in a menu state, keep the action menu visible with "Spell"
+## highlighted, and dock the spell list to its right (the nesting convention). The submenu is
+## rebuilt for the active unit's `known_spells` each time it opens.
+func _enter_spell_menu() -> void:
+	_phase = Phase.SPELL_MENU
+	_spell_index = 0
+	var names: Array = []
+	var costs: Array = []
+	for spell in _active_unit.known_spells:
+		names.append(spell.display_name)
+		costs.append(spell.mp_cost)
+	_spell_menu.build(names, costs)
+	_refresh_spell_menu()
+	# Dock beside the action menu's current box (it's visible and laid out, so its rect is valid).
+	_spell_menu.open_beside(_menu.panel_rect())
+
+
+## Move the spell highlight (wrapping) and re-render affordability.
+func _set_spell_index(index: int) -> void:
+	_spell_index = wrapi(index, 0, _active_unit.known_spells.size())
+	_refresh_spell_menu()
+
+
+## Re-render the spell rows: highlight the current one and grey out any the active unit can't
+## currently afford (live MP vs each spell's cost).
+func _refresh_spell_menu() -> void:
+	var affordable: Array = []
+	for spell in _active_unit.known_spells:
+		affordable.append(_active_unit.current_mp >= spell.mp_cost)
+	_spell_menu.refresh(_spell_index, affordable)
+
+
+## Pick the highlighted spell: if the unit can afford it, enter the targeting phase with that
+## spell's `Attack` profile (MP is spent later, on commit); otherwise flash "Not Enough MP" and
+## stay in the submenu.
+func _activate_spell_option() -> void:
+	var spell: Attack = _active_unit.known_spells[_spell_index]
+	if _active_unit.current_mp < spell.mp_cost:
+		_spell_menu.flash_insufficient()
+		return
+	_enter_attack_phase(spell)
+
+
+## Back out of the spell submenu to the parent action menu (Left/Esc): hide the submenu and return
+## to the MENU phase, leaving the action menu as it was (still highlighting "Spell").
+func _exit_spell_menu() -> void:
+	_phase = Phase.MENU
+	_spell_menu.set_menu_visible(false)
 
 
 ## "Stats" action: print the active unit's full block (for console verification) and
@@ -439,6 +626,7 @@ func _commit_move(screen_point: Vector2) -> void:
 		return
 
 	_perform_move(tile_path)
+	_actions_taken += 1   # a committed move spends one of the turn's action slots
 	# Back to the menu (so you can End Turn). The unit keeps walking meanwhile.
 	_start_turn()
 
@@ -456,25 +644,43 @@ func _perform_move(tile_path: Array) -> void:
 
 # --- Attack phase ------------------------------------------------------------
 
-## Switch from the menu into aiming an attack: hide the menu, snapshot the active unit's basic
-## attack + its reachable tiles, and fill those tiles orange. Clicking an enemy in range then
-## commits (see `_attack_input`); Escape returns to the menu. Mirrors `_enter_move_phase`, but
-## the overlay is a *fill* of "where I can hit" rather than the move-range outline.
-func _enter_attack_phase() -> void:
+## Switch from the menu into aiming an attack with `profile` (the unit's weapon attack from
+## "Attack", or a chosen spell from the submenu) + snapshot its reachable tiles. The display is
+## split in two so a ranged shot or spell reads clearly: the whole reach *band* gets the black
+## move-range OUTLINE ("everywhere this attack covers"), while only the tiles holding an enemy in
+## that band are *filled* orange ("what you can actually hit"). Clicking an in-range enemy commits
+## (see `_attack_input`); Escape returns to the menu. `_attack_tiles` indexes the full band so the
+## click check is O(1); the per-tile enemy test in `_try_attack` still decides a legal target.
+func _enter_attack_phase(profile: Attack) -> void:
 	_phase = Phase.ATTACK
 	_menu.set_menu_visible(false)
+	_spell_menu.set_menu_visible(false)   # if we came from the spell submenu
 	_status_panel.hide_panel()
 	_unpin_stats()
 	_clear_plan()   # drop any move overlays before drawing the attack reach
 
-	_attack_profile = _active_unit.physical_attack()
+	_attack_profile = profile
 	var tiles := _battlefield.tiles_in_range(
 		_active_unit.grid_coord, _attack_profile.min_range, _attack_profile.max_range)
-	# Index the tiles for O(1) target validation on click.
+
+	# Index the whole band for O(1) target validation on click, and outline it the same way the
+	# move range is drawn (show_move_range keys on a dict's tiles) so the reach silhouette — outer
+	# edge plus the point-blank hole for ranged — shows "all around the unit".
 	_attack_tiles = {}
+	var band := {}
 	for t in tiles:
 		_attack_tiles[t] = true
-	_battlefield.show_attack_range(tiles)
+		band[t] = true
+	_battlefield.show_move_range(band)
+
+	# Fill orange ONLY the band tiles that hold a viable target (an enemy of the active unit), so
+	# the orange squares mark exactly who can be hit, not the empty reach.
+	var targets: Array[Vector2i] = []
+	for t in tiles:
+		var occupant: Unit = _units_by_tile.get(t)
+		if occupant != null and occupant.allegiance != _active_unit.allegiance:
+			targets.append(t)
+	_battlefield.show_attack_range(targets)
 
 
 ## Attack-phase input: left-click an in-range enemy to strike; Escape backs out to the menu.
@@ -495,17 +701,31 @@ func _try_attack(screen_point: Vector2) -> void:
 	var target: Unit = _units_by_tile.get(tile)
 	if target == null or target == _active_unit or target.allegiance == _active_unit.allegiance:
 		return
-	_commit_attack(_active_unit, target, _attack_profile)
+	await _commit_attack(_active_unit, target, _attack_profile)
+	_start_turn()   # back to the menu (Attack/Spell now greyed by the spent offensive action)
 
 
-## Resolve and play out one attack, then return to the menu. The mechanics (hit roll + damage)
-## are computed up front by `CombatResolver`; the *presentation* is sequenced separately and
-## awaited — swing animation, then apply damage on impact, then a death animation if it was
-## lethal — so other reactions can be slotted into this sequence later. Input is gated by
-## `_resolving_action` for the duration so a second attack can't be queued mid-swing.
+## Resolve and play out one attack, awaitable so the caller can sequence what comes next (the
+## player returns to the menu, the enemy AI ends its turn). The mechanics (hit roll + damage) are
+## computed up front by `CombatResolver`; the *presentation* is sequenced separately and awaited —
+## attack animation, then apply damage on impact, then a death animation if it was lethal — so
+## other reactions can be slotted in later. Shared by both sides (so enemy arrow/fireball/bonk
+## animations come for free). Input is gated by `_resolving_action` for the duration so the player
+## can't queue a second attack mid-swing.
 func _commit_attack(attacker: Unit, target: Unit, attack: Attack) -> void:
 	_resolving_action = true
 	_battlefield.clear_attack_range()
+	_battlefield.clear_move_range()   # the band outline drawn in _enter_attack_phase
+
+	# Spend an action slot and mark the offensive action used (a turn allows only one attack/spell),
+	# so the menu greys Attack/Spell when we return to it.
+	_actions_taken += 1
+	_offensive_taken = true
+
+	# Pay the cost up front (the spell menu already confirmed it was affordable). 0 for basic
+	# weapon attacks, so this is a no-op for melee/arrow — only spells spend MP.
+	if attack.mp_cost > 0:
+		attacker.spend_mp(attack.mp_cost)
 
 	var outcome := CombatResolver.resolve(attacker, target, attack, _rng)
 	print("%s attacks %s with %s — roll %.2f vs %.2f → %s (%d dmg)" % [
@@ -521,7 +741,6 @@ func _commit_attack(attacker: Unit, target: Unit, attack: Attack) -> void:
 			await _kill_unit(target)
 
 	_resolving_action = false
-	_start_turn()
 
 
 ## Pop a floating "-N" damage number above `target` and let it rise/fade on its own. Parented
@@ -545,6 +764,58 @@ func _kill_unit(unit: Unit) -> void:
 		_hover_unit = null
 		_hide_stat_panel()
 	unit.queue_free()
+	# A death may have wiped a side — check now (after the unit is off the board) and, if so, kick
+	# off the win/lose sequence.
+	_check_battle_end()
+
+
+## After a death, see whether one side has been wiped out and, if so, end the battle. Only one unit
+## dies per attack and the attacker's side always survives, so a wipe means: no enemies left → the
+## player WON; no players left → the player LOST. No-op once the game is already over.
+func _check_battle_end() -> void:
+	if _game_over:
+		return
+	var players_alive := false
+	var enemies_alive := false
+	for u in _units_by_tile.values():
+		if u.allegiance == Unit.Allegiance.PLAYER:
+			players_alive = true
+		else:
+			enemies_alive = true
+	if not enemies_alive:
+		_end_battle(true)
+	elif not players_alive:
+		_end_battle(false)
+
+
+## Latch the battle as decided and play the end sequence. Sets `_game_over` (which gates the turn
+## loop, input, and per-frame work everywhere), clears the gameplay HUD, then fires the cinematic
+## fire-and-forget so this returns immediately (the kill/attack call chain unwinds cleanly while the
+## celebration plays on its own).
+func _end_battle(win: bool) -> void:
+	_game_over = true
+	_menu.set_menu_visible(false)
+	_spell_menu.set_menu_visible(false)
+	_status_panel.hide_panel()
+	_hide_stat_panel()
+	_shift_counter.set_count(-1)          # negative hides the countdown box
+	_battlefield.clear_active_tile()
+	_clear_plan()                         # drop any lingering move/attack overlays
+	_play_end_sequence(win)
+
+
+## The end cinematic: pull the camera back to the whole-map framing, then — on a win — spin the
+## camera forever and fade the rainbow "YOU WIN" in; on a loss, fade the screen to black with a deep
+## red "YOU LOSE". Runs detached (not awaited) so it owns the screen for the rest of the session.
+func _play_end_sequence(win: bool) -> void:
+	if win:
+		_camera.start_victory_orbit()     # begin the slow spin as we pull back
+	_camera.focus_on(Vector3.ZERO)        # recenter on the whole map (follow is gated off now)
+	await _camera.zoom_to(_camera.home_ortho_size(), MAP_ZOOM_TIME)
+	if win:
+		_end_screen.show_win()
+	else:
+		_end_screen.show_lose()
 
 
 # --- Turn / active-unit management -------------------------------------------
@@ -553,12 +824,20 @@ func _kill_unit(unit: Unit) -> void:
 ## highlighted, and clear any half-planned move. Called when a unit becomes active,
 ## after a move commits, and when cancelling out of move mode.
 func _start_turn() -> void:
+	# If the battle just ended (e.g. the attack that returns here killed the last enemy), don't
+	# re-open the menu over the end screen.
+	if _game_over:
+		return
 	_phase = Phase.MENU
-	_menu_index = 0
 	_clear_plan()
 	_unpin_stats()
+	_spell_menu.set_menu_visible(false)   # close any nested submenu when returning to the menu
 	_hovered_tile = Battlefield.INVALID_TILE
 	_menu.set_menu_visible(true)
+	# Grey out whatever the per-turn budget now forbids, and put the cursor on the first option that
+	# is still choosable (so it doesn't start on a just-greyed action after the unit acted).
+	_refresh_menu_enabled()
+	_menu_index = _first_enabled_index()
 	_menu.set_highlighted(_menu_index)
 	# Show the active unit's persistent status box alongside the menu (FFT layout).
 	if _active_unit != null:
@@ -664,11 +943,22 @@ func _position_stat_panel(unit: Unit) -> void:
 ## the placeholder AI. `unit` is null only if the roster empties, in which case we just
 ## clear the marker. This replaces the old `_set_active_unit`, which `Main` called itself.
 func _on_active_unit_changed(unit: Unit) -> void:
+	# Battle's over — ignore any further hand-offs from the (still-ticking) turn manager so the end
+	# sequence isn't interrupted by a menu opening or an enemy turn starting.
+	if _game_over:
+		return
 	_active_unit = unit
 	if unit == null:
 		_battlefield.clear_active_tile()
 		return
+	# Fresh turn → fresh action budget (per-turn limit; see MAX_ACTIONS_PER_TURN).
+	_actions_taken = 0
+	_offensive_taken = false
 	_menu.set_title(unit.display_name())  # show whose turn it is
+	# Build the action menu for THIS unit (casters get "Spell"); the list can differ per unit, so
+	# rebuild on each hand-off rather than reusing a fixed set.
+	_menu_options = _menu_options_for(unit)
+	_menu.build(_menu_options)
 	_update_active_marker()
 	# One-time intro punch-in: the first unit to ever go active gets a zoom-in; after that the
 	# player controls the zoom. The pan onto the unit is the normal `focus_on` slew.
@@ -681,69 +971,157 @@ func _on_active_unit_changed(unit: Unit) -> void:
 		_take_enemy_turn(unit)
 
 
-## Drive an enemy's turn as the SAME sequence a player performs — just self-driven with no
-## menus — so the player sees the computer obey the identical movement rules ("a fair
-## fight") and we can build smarter AI on the player's own action functions later. The
-## beats, with a pause between each so it reads as a deliberate turn, not a teleport:
-##   1. enter the move phase (`_enter_move_phase`) — pops the reachable-tile outline,
-##   2. pick a random reachable tile and show the chosen path the same way the player
-##      previews theirs (`classify_path` + `show_path`, the very same legal-path overlay),
-##   3. walk it via the shared `_perform_move`, then end the turn when the walk lands
-##      (or end immediately if there was nowhere to go).
-## `await` also defers the work past the signal that triggered this turn, so ending a turn
-## never re-enters the turn manager from inside its own emission.
+## Drive an enemy's turn with a simple offense AI, reusing the player's own action functions so the
+## computer obeys the identical rules ("a fair fight"). The loop, within the per-turn budget (≤2
+## actions, ≤1 attack), with a pause between beats so it reads as deliberate, not a teleport:
+##   1. If a target is already in range of its best attack, strike and end (no move).
+##   2. Otherwise move toward the nearest enemy (the same reachable outline + path preview the
+##      player sees), then try to strike from the new position.
+##   3. If still out of range after that move, spend the second action closing further, then end.
+## "Best attack" prefers an affordable spell over the basic weapon attack. Attacks run through the
+## shared `_commit_attack`, so enemy arrow/fireball/bonk animations (with their pauses) come for
+## free. The leading `await` also defers the work past the signal that began this turn, so ending
+## it never re-enters the turn manager from inside its own emission.
 func _take_enemy_turn(unit: Unit) -> void:
-	# Hide any stale player menu from the previous turn before the opening pause.
+	# Hide any stale player menu (and nested submenu) from the previous turn before the opening pause.
 	_menu.set_menu_visible(false)
+	_spell_menu.set_menu_visible(false)
 	_status_panel.hide_panel()
 	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
 
-	# Beat 1: the same move phase a player enters — shows the "available blocks" outline and
-	# snapshots the reachability/occupancy the AI will pick from (_reachable/_move_*).
-	_enter_move_phase()
-	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
+	# The attack this enemy will try all turn — a spell it can afford if any, else its weapon.
+	var attack := _enemy_choose_attack(unit)
 
-	# Beat 2: choose where to go. No legal destination → drop the outline and pass.
-	var path := _ai_pick_move(unit)
-	if path.size() < 2:
-		_clear_plan()
+	# 1) Already in range? Strike without moving, then end the turn.
+	var target := _enemy_target_in_range(unit, attack)
+	if target != null:
+		await _enemy_attack(unit, attack, target)
 		_turn_manager.end_turn()
 		return
 
-	# Show the chosen route with the player's own legal-path preview, so the move the enemy
-	# is about to make is on screen under the same blue/red rules the player follows.
+	# Need to close in. With no enemies left there's nothing to do.
+	var prey := _nearest_enemy(unit)
+	if prey == null:
+		_turn_manager.end_turn()
+		return
+
+	# 2) Move toward the prey, then try to strike from the new position.
+	await _enemy_move_toward(unit, prey, attack)
+	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
+	target = _enemy_target_in_range(unit, attack)
+	if target != null:
+		await _enemy_attack(unit, attack, target)
+		_turn_manager.end_turn()
+		return
+
+	# 3) Still out of range — spend the second action closing further, then end.
+	await _enemy_move_toward(unit, prey, attack)
+	_turn_manager.end_turn()
+
+
+## The attack an enemy uses this turn: the first spell it can currently afford (offense prefers
+## magic), otherwise its basic weapon attack. Returns a fresh `Attack` (range band + anim + cost).
+func _enemy_choose_attack(unit: Unit) -> Attack:
+	for spell in unit.known_spells:
+		if unit.current_mp >= spell.mp_cost:
+			return spell
+	return unit.basic_attack()
+
+
+## The nearest enemy of `unit` that is *within `attack`'s range band right now* (hittable without
+## moving), or null. Distance is flat grid (Manhattan), matching `tiles_in_range`.
+func _enemy_target_in_range(unit: Unit, attack: Attack) -> Unit:
+	var best: Unit = null
+	var best_dist := 1 << 30
+	for other in _units_by_tile.values():
+		if other.allegiance == unit.allegiance:
+			continue
+		var dist := _grid_distance(unit.grid_coord, other.grid_coord)
+		if dist >= attack.min_range and dist <= attack.max_range and dist < best_dist:
+			best_dist = dist
+			best = other
+	return best
+
+
+## The nearest enemy of `unit` by flat grid distance, ignoring range (the prey to close on), or
+## null if none remain.
+func _nearest_enemy(unit: Unit) -> Unit:
+	var best: Unit = null
+	var best_dist := 1 << 30
+	for other in _units_by_tile.values():
+		if other.allegiance == unit.allegiance:
+			continue
+		var dist := _grid_distance(unit.grid_coord, other.grid_coord)
+		if dist < best_dist:
+			best_dist = dist
+			best = other
+	return best
+
+
+## Move `unit` one step of its turn toward `prey`: enter the move phase (compute reachability + show
+## the outline the player sees), pick a destination, preview the path, then walk it and wait for
+## arrival. Destination = the reachable tile that puts `prey` inside `attack`'s range band with the
+## least movement if one exists; otherwise the reachable tile that gets closest to `prey`. A no-op
+## (nowhere better to stand) just clears the overlays.
+func _enemy_move_toward(unit: Unit, prey: Unit, attack: Attack) -> void:
+	_enter_move_phase()   # snapshots _reachable / _move_solid / _move_occupied and shows the outline
+	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
+
+	var dest := _enemy_pick_destination(unit, prey, attack)
+	if dest == unit.grid_coord:
+		_clear_plan()
+		return
+	var path := _battlefield.find_path(
+		unit.grid_coord, dest, unit.max_stats.move, unit.max_stats.jump,
+		_move_solid, _move_occupied)
+	if path.size() < 2:
+		_clear_plan()
+		return
+
+	# Preview the route under the same blue/red legality rules the player follows, then walk it.
 	var flags := _battlefield.classify_path(
 		path, unit.max_stats.move, unit.max_stats.jump, _move_solid, _move_occupied)
 	_battlefield.show_path(path, flags)
 	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
-
-	# Beat 3: walk it via the shared action (which clears the overlays), then end the turn
-	# when the walk finishes (one-shot: the connection drops after it fires).
-	unit.move_finished.connect(_on_enemy_move_finished, CONNECT_ONE_SHOT)
-	_perform_move(path)
+	_perform_move(path)   # clears the overlays and starts the walk
+	await unit.move_finished
 
 
-## The AI's destination policy: from the reachable set `_enter_move_phase` just computed into
-## `_reachable`, pick a random tile (preferring to actually move over standing still) and
-## return the legal step-path to it, or `[]` if there's nowhere to go. Reuses the player's
-## snapshotted constraints (`_move_solid`/`_move_occupied`) so the enemy obeys the identical
-## jump/occupancy rules. This is the one enemy-specific piece — swap it for smarter logic
-## later and the rest of the turn (range outline, path preview, move, end) is unchanged.
-func _ai_pick_move(unit: Unit) -> Array:
-	var candidates: Array = _reachable.keys()
-	candidates.erase(unit.grid_coord)   # drop "stay put" so the unit moves when it can
-	if candidates.is_empty():
-		return []
-	var dest: Vector2i = candidates[_rng.randi_range(0, candidates.size() - 1)]
-	return _battlefield.find_path(
-		unit.grid_coord, dest, unit.max_stats.move, unit.max_stats.jump,
-		_move_solid, _move_occupied)
+## Pick where an enemy should move from the reachable set (`_reachable`, just computed by
+## `_enter_move_phase`): prefer a tile that brings `prey` inside `attack`'s range band, choosing the
+## one needing the least movement; failing that, the reachable tile that minimizes distance to
+## `prey` (close in for next turn). Returns the current tile if neither beats standing still.
+func _enemy_pick_destination(unit: Unit, prey: Unit, attack: Attack) -> Vector2i:
+	var in_range_tile := Battlefield.INVALID_TILE
+	var in_range_cost := 1 << 30
+	var closer_tile := unit.grid_coord
+	var closer_dist := _grid_distance(unit.grid_coord, prey.grid_coord)
+	for tile in _reachable:
+		var dist := _grid_distance(tile, prey.grid_coord)
+		if dist >= attack.min_range and dist <= attack.max_range:
+			var cost: int = _reachable[tile]
+			if cost < in_range_cost:
+				in_range_cost = cost
+				in_range_tile = tile
+		if dist < closer_dist:
+			closer_dist = dist
+			closer_tile = tile
+	return in_range_tile if in_range_tile != Battlefield.INVALID_TILE else closer_tile
 
 
-## The active enemy finished walking — end its turn so the schedule advances. Bound one-shot
-## in `_take_enemy_turn`; the arg is the unit the signal reports (unused — it's the active one).
-func _on_enemy_move_finished(_unit: Unit) -> void:
-	_turn_manager.end_turn()
+## Telegraph then resolve an enemy strike on `target`: flash the orange marker on the target tile,
+## brief pause, then run the shared `_commit_attack` (which clears the marker and plays the attack's
+## own animation). Awaitable so the caller ends the turn only after it resolves.
+func _enemy_attack(unit: Unit, attack: Attack, target: Unit) -> void:
+	_battlefield.show_attack_range([target.grid_coord])
+	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
+	await _commit_attack(unit, target, attack)
+
+
+## Flat grid (Manhattan) distance between two tiles — the same metric `tiles_in_range` uses, so the
+## AI's range checks agree with the targeting overlay.
+func _grid_distance(a: Vector2i, b: Vector2i) -> int:
+	return abs(a.x - b.x) + abs(a.y - b.y)
 
 
 ## The map's turn came up (every N character turns, per the turn manager) — play the
@@ -763,6 +1141,7 @@ func _play_map_transition() -> void:
 	_map_transition_playing = true
 	# Clear the player UI so the wide shot is unobstructed; the next turn restores it.
 	_menu.set_menu_visible(false)
+	_spell_menu.set_menu_visible(false)
 	_status_panel.hide_panel()
 
 	var restore_zoom: float = _camera.ortho_size   # register where to zoom back to
@@ -827,11 +1206,12 @@ func _relocate_unit(unit: Unit, dest: Vector2i) -> void:
 	_units_by_tile[dest] = unit
 
 
-## True only while a PLAYER unit holds the turn AND no map-transition cinematic is playing —
-## the gate for all player input (menu keys and move placement), so input does nothing during
-## an enemy's self-driven AI turn or while the map is shifting.
+## True only while a PLAYER unit holds the turn AND no map-transition cinematic is playing AND the
+## battle is still on — the gate for all player input (menu keys and move placement), so input does
+## nothing during an enemy's self-driven AI turn, while the map is shifting, or after the battle ends.
 func _is_player_turn() -> bool:
 	return _active_unit != null \
 		and _active_unit.allegiance == Unit.Allegiance.PLAYER \
 		and not _map_transition_playing \
-		and not _resolving_action
+		and not _resolving_action \
+		and not _game_over

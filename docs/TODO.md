@@ -76,29 +76,54 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       → apply damage → floating `-N` (`FloatingCombatText`, self-freeing Label3D) → death
       (`Unit.play_death_animation` topple+fade) → remove from board + turn order. See
       `docs/DECISION_LOG.md`.
+- [x] Win/lose end screen — after a death, `Main._check_battle_end` polls for a wiped side. Win →
+      camera pulls back + spins a slow indefinite 360° (`CameraController.start_victory_orbit`) while
+      a huge "YOU WIN" fades in and smoothly cycles the rainbow; lose → camera pulls back, screen
+      fades to black, big deep-red "YOU LOSE", held. `EndScreen.gd` (font tinted via `modulate` so
+      one tween drives both fade + color cycle). `_game_over` latches and gates the turn loop /
+      input / per-frame work. (No restart menu yet — holds until quit.) See `docs/DECISION_LOG.md`.
+- [x] Per-turn action economy — a turn = up to 2 committed actions, at most one an attack/spell
+      (move+move, or move+attack/spell either order). Stats/End Turn are free; cancelling spends
+      nothing. `Main._actions_taken`/`_offensive_taken` (reset per turn) + `_is_action_enabled`
+      drive both the menu greying (`ActionMenu.set_enabled`) and activation refusal. See
+      `docs/DECISION_LOG.md`.
 
 ## Next
 
 ### Next up — ranged + magic attacks, and a Spells menu
 The melee pipeline was built generic for exactly this; most of the work is *data + a projectile
 animation + a conditional menu*, not new mechanics.
-- [ ] **Arrow (ranged physical) + Fireball (magic) attacks** — author `Attack` profiles with a
-      range *band* that excludes point-blank (e.g. bow `min_range 3 / max_range 6`, fireball
-      similar) and, for fireball, `power = MAGICAL` (so `CombatResolver` reads `mag_atk`/`mag_def`
-      automatically). Targeting (`tiles_in_range`, orange overlay, click-to-commit) already
-      supports `min_range > 1`.
-- [ ] **Projectile animations** — add `AnimKind` cases (e.g. `ARROW`, `FIREBALL`) + new
-      branches in `Unit.play_attack_animation` (or a dedicated effects helper) for a travelling
-      projectile from attacker → target, instead of the on-attacker bonk. Keep them awaitable
-      and separate like the bonk so the resolve→animate→damage→float→death sequence is reused.
-- [ ] **Per-unit spell list + conditional "Spells" menu** — give `Unit` a list of known
-      abilities (data; the Mage *starts with Fireball*). The action menu becomes per-unit: show a
-      **"Spells"** option only when the active unit has ≥1 spell. Selecting it lists the unit's
-      spells; picking one enters `Phase.ATTACK` with that `Attack` profile (the basic "Attack"
-      stays the reach-1 melee). Needs the menu options built per active unit rather than the
-      current fixed `MENU_OPTIONS`.
-- [ ] **(stretch) enemy attacks** — let the enemy AI use the same `_commit_attack` path when a
-      target is in range, so combat is two-sided. Resolver + animations are already generic.
+- [x] **Arrow (ranged physical) + Fireball (magic) attacks** — *both done.* Arrow:
+      `Attack.physical_ranged()` (band `3..6`, physical, `ARROW`), via a per-unit `weapon_type`
+      (`Unit.WeaponType`, archer → RANGED) that makes `Unit.basic_attack()` (renamed from
+      `physical_attack`) pick melee vs ranged. Fireball: `Attack.fireball()` (band `2..5`,
+      `MAGICAL` so `CombatResolver` reads `mag_atk`/`mag_def`, `FIREBALL` anim, `mp_cost 5`). The
+      attack phase outlines the whole reach band (move-range black outline) and fills orange **only**
+      the band tiles holding an enemy. Damage is plain `atk−def` for now (item-based ranged/spell
+      tuning later).
+- [x] **Projectile animations** — *both done* via a shared, awaitable `scripts/Projectile.gd`
+      effect (sibling of `FloatingCombatText`): carries a caller-supplied *visual* node A→B with a
+      parabolic arc (`arc_peak`) or straight line, and optional `face_travel` orientation. Arrow =
+      a thin rod that lobs + noses along its arc; Fireball = a bloomed, firey-orange glowing
+      **sphere** flying flat (`arc_peak 0`, `face_travel` off). Bloom needed WorldEnvironment
+      **glow** enabled (HDR threshold 1.0 so only the emissive orb blooms). Bonk + death stay on
+      `Unit` (reach a future `Boss` via `extends Unit`).
+- [x] **Per-unit spell list + conditional "Spell" menu** — *done.* `Unit.known_spells`
+      (mage starts with Fireball, defaulted in `_apply_appearance`); the action menu is built per
+      active unit (`_menu_options_for`) so **"Spell"** shows only for casters. New **nested-submenu
+      convention** (`SpellMenu.gd`): a submenu docks to the *right* of the menu that spawned it
+      (which stays visible/highlighted), and **Left/Esc** backs out. Spell rows show name (left) +
+      MP cost (right-aligned); unaffordable spells are greyed and selecting one flashes a
+      "Not Enough MP" toast (~2s, fades). Picking an affordable spell enters `Phase.ATTACK` with its
+      profile; MP is spent on commit (`Unit.spend_mp`).
+- [x] **(stretch) enemy attacks** — *done.* Simple offense AI in `Main._take_enemy_turn`: pick the
+      best available attack (affordable spell first, else weapon), strike if a target is already in
+      range, else move toward the nearest enemy (least movement into the range band, or just closer)
+      and try again, else move once more — all within the 2-action / 1-offensive budget. Reuses the
+      shared `_commit_attack` (so enemy arrow/fireball/bonk animations + pauses come for free) and
+      the player's move-phase overlays. Enemies reset to **level 1** for a fair test fight. Known v1
+      limitation: a ranged enemy with no in-range reachable tile just walks *closer*, so it can
+      step inside its own min-range and need a turn to re-kite. See `docs/DECISION_LOG.md`.
 
 ### After the single battle is fun — the run loop
 Sequenced deliberately: finish a *complete, fun single battle* first, then a minimal
@@ -179,6 +204,13 @@ The move to **node composition + signals** as the battle architecture landed wit
 `TurnManager` extraction — logged in `docs/DECISION_LOG.md` (2026-06-21).
 
 ## Polish / nice-to-have
+- [ ] **Combat balance pass — fights are too long/tedious.** With the subtractive `atk − def`
+      formula (floored at 1) and small atk/def stats, many matchups bottom out at **1 damage per
+      hit**, so chewing through a ~30 HP pool takes forever — especially since a unit can attack only
+      once per turn. Re-tune so combat resolves in a satisfying number of rounds. Levers to weigh:
+      lower HP pools (or raise damage), widen the atk–def spread so hits land 3–8 not 1, weapon/spell
+      power multipliers (ranged/spell tuning was deferred — `Attack` damage is still plain `atk−def`),
+      and revisit the small-numbers philosophy in `docs/GAME_DESIGN.md`/`DECISION_LOG.md` if needed.
 - [ ] Live-update visible stat blocks (HP/MP/CT) — the `StatPanel` (hover) and `StatusPanel`
       (status box) call `Unit.stats_panel_text()` once when shown, so a block on screen when a
       unit takes damage / spends MP / charges CT shows stale numbers. Refresh while visible

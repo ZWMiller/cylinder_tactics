@@ -6,6 +6,150 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-22 — Win/lose end screen + `_game_over` latch
+
+**Decision:** A battle ends when one side is wiped. `Main._check_battle_end` (called at the end of
+`_kill_unit`, after the unit is off the board) scans `_units_by_tile`: no enemies → win, no players
+→ loss (the attacker's side always survives a single-target kill, so it's never ambiguous).
+`_end_battle` sets a `_game_over` latch that gates the turn loop (`_on_active_unit_changed`,
+`_start_turn`), input (`_input`, `_is_player_turn`) and per-frame work (`_process`), then fires the
+cinematic detached (not awaited) so the kill/attack call chain unwinds cleanly.
+
+**Win:** camera pulls back to the whole-map framing and starts an indefinite slow spin
+(`CameraController.start_victory_orbit`, a steady yaw add in `_process`); "YOU WIN" fades in and
+cycles red→yellow→green→cyan→blue→magenta→… forever. **Loss:** same pull-back, then a black curtain
+fades in and a deep-red "YOU LOSE" fades over it, held until quit (restart menu is later).
+
+**Implementation note (`EndScreen.gd`):** the headline `Label` keeps a white `font_color` and is
+tinted by animating the CanvasItem **`modulate`** — one tweenable Color gives both the fade (alpha)
+and the smooth color cycle (RGB) from a single looping tween (`create_tween().set_loops()`). A black
+font outline survives the tint (black × anything = black), keeping the giant text readable over the
+busy map. Same self-contained CanvasLayer-view pattern as the other HUD boxes.
+
+---
+
+## 2026-06-22 — Two-sided combat: a simple enemy offense AI on the shared action path
+
+**Decision:** Enemies now attack via a small AI (`Main._take_enemy_turn`), reusing the *player's
+own* functions so both sides obey identical rules. Per turn: choose the best available attack
+(first affordable spell, else basic weapon), then — within the 2-action / 1-offensive budget —
+(1) strike if a target is already in `attack`'s range band, else (2) move toward the nearest enemy
+and try again, else (3) move once more and end. Targeting/movement helpers (`_enemy_choose_attack`,
+`_enemy_target_in_range`, `_nearest_enemy`, `_enemy_pick_destination`, `_grid_distance`) are the
+only enemy-specific code; everything visible (reachable outline, path preview, the attack itself)
+is the shared player path. Replaced the old random-walk AI (`_ai_pick_move`).
+
+**Refactor it required:** `_commit_attack` no longer calls `_start_turn` itself — it's now an
+awaitable that just resolves the attack, and the *caller* sequences what's next (player →
+`_start_turn`; enemy → `_turn_manager.end_turn()`). Enemy moves `await unit.move_finished` inline
+instead of the old one-shot `move_finished` connection, which linearizes the multi-step AI. Because
+`_commit_attack` already awaits `Unit.play_attack_animation`, enemy arrow/fireball/bonk animations
+(with pauses) work with no extra wiring.
+
+**Decision (enemies → level 1):** the demo enemy roster was dropped from level 3 to level 1 to
+match the PCs for a fair shake-out fight. The start positions also make turn 1 exercise all three
+enemy attack animations (enemy archer and mage begin in range; the soldier closes and bonks).
+
+**Known v1 limitation:** when no reachable tile lands a ranged enemy inside its range band, it
+moves to the tile merely *closest* to the prey — which can put it inside its own min-range (too
+close to shoot), costing a turn to re-position. Acceptable for the first pass; revisit with a
+band-aware destination score.
+
+---
+
+## 2026-06-22 — Per-turn action economy: 2 actions, at most 1 offensive
+
+**Decision:** A unit's turn allows up to **2 committed actions**, of which **at most one** may be an
+attack or spell. So a turn is move+move, or move+attack/spell in either order. **Stats** and **End
+Turn** are free (don't count); only *committed* actions count — cancelling out of move/targeting
+spends nothing. Once an attack/spell is committed, Attack + Spell grey out (leaving Move — if a
+slot remains — plus Stats/End Turn). FFT-style "act then move (or move then act)".
+
+**Implementation:** `Main` tracks `_actions_taken` (≤ `MAX_ACTIONS_PER_TURN = 2`) and
+`_offensive_taken`, reset each turn in `_on_active_unit_changed`, bumped by the player's move commit
+(`_commit_move`) and the attack/spell commit (`_commit_attack`). `_is_action_enabled(action)` is the
+single rule used **both** to grey the menu (`ActionMenu.set_enabled`, new disabled-grey render path)
+**and** to refuse activation, so what's greyed is exactly what's blocked. After each commit
+`_start_turn` re-greys and moves the cursor to the first still-enabled option. Enemies bypass this
+(they self-drive one move via `_perform_move`); the budget is player-menu UX.
+
+---
+
+## 2026-06-22 — Fireball (magic spell): MP-costed `Attack`, per-unit spell list, nested submenus
+
+**Decision (spells are just `Attack` profiles with an `mp_cost`):** `Attack.fireball()` is a
+`MAGICAL` profile (band 2..5, `FIREBALL` anim, `mp_cost 5`); `CombatResolver` already reads
+`mag_atk − mag_def` for `MAGICAL`, so no mechanics changed. The MP cost lives **on the attack
+profile**, not the caster, so cost travels with the ability and the one generic pipeline gates a
+free swing and a costed spell by a single number. MP is checked to grey out unaffordable spells and
+spent on *commit* (`Unit.spend_mp`), so cancelling out of targeting refunds nothing.
+
+**Decision (spell list on `Unit`, defaulted from class):** `Unit.known_spells: Array[Attack]`
+(mage → Fireball), populated in `_apply_appearance` alongside `weapon_type` — the same per-unit
+"class loadout" precedent. `has_spells()` gates the menu entry; a real spell-learning/job system
+will later grow the list independently of class.
+
+**Decision (per-unit action menu):** the action menu is rebuilt each turn by `_menu_options_for`
+(replacing the fixed `MENU_OPTIONS` const), so **"Spell"** appears only for casters. Options are
+referenced by `const` strings (`_ACTION_*`) instead of raw literals.
+
+**Decision (nested-submenu convention):** rather than a submenu *replacing* its parent, a submenu
+**docks to the right of the menu that spawned it** (which stays visible with its triggering option
+highlighted), and **Left/Esc backs out** to the parent. `ActionMenu.panel_rect()` exposes the
+parent's on-screen box; `SpellMenu.open_beside(rect)` slides in beside it. This is meant as the
+reusable pattern for future submenus (Items, etc.), not a one-off. New `Phase.SPELL_MENU` is a
+sub-state of the menu (keyboard-navigated in `_input`, like `MENU`). The spell rows are
+`HBoxContainer`s (name `Label` set to expand, pushing a cost `Label` to the right edge) to get the
+right-aligned MP cost; unaffordable rows grey out, and selecting one flashes a self-fading
+"Not Enough MP" toast beside the menu.
+
+**Decision (enable WorldEnvironment glow for bloom):** the fireball orb is an emissive sphere
+driven well past 1.0 (HDR); glow was **off**, so it was enabled in `Main.tscn`. Key gotcha:
+`glow_bloom` must stay **0** — it adds glow to the *entire* image regardless of the HDR threshold
+(a non-zero value made everything bloom). With `glow_bloom = 0` and `glow_hdr_threshold = 1.5`,
+only HDR-bright pixels (the orb, emission energy 6) bloom, leaving the LDR terrain/sky unaffected.
+Tune `glow_*` + `Unit._FIREBALL_GLOW_ENERGY` for more/less.
+
+---
+
+## 2026-06-22 — Ranged (arrow) attack: weapon-type dispatch + a shared `Projectile` effect
+
+**Decision (weapon type lives on `Unit`, not `StatBlock`):** The "Attack" action now picks the
+melee or ranged pipeline by reading a per-unit `weapon_type` (`WeaponType.MELEE/RANGED`).
+`Unit.basic_attack()` (renamed from `physical_attack()`) returns `Attack.physical_melee()` or
+`Attack.physical_ranged()` (range band 3–6, physical, arrow anim) accordingly. The weapon type is
+defaulted from the class in `_apply_appearance` (archer → RANGED) — the single code path that
+applies a class — so a reclass swaps the default weapon too; equipment will later override the
+stored field.
+
+**Why not `StatBlock`** (the first instinct): `StatBlock` is a purely *numeric* profile that gets
+summed across base + growth + aptitude (`combined()`/`scaled()`); an enum has no meaningful sum.
+The codebase already keeps live per-unit state (`current_hp`, `current_exp`, `ct`) off the shared
+template for exactly this reason — `weapon_type` follows that precedent.
+
+**Decision (the arrow is a shared `Projectile` *effect*, not a Unit method):** Flight motion lives
+in `scripts/Projectile.gd` — a self-freeing, awaitable effect that carries a caller-supplied
+*visual* node from A to B, mirroring the existing `FloatingCombatText` pattern. It supports both a
+parabolic arc (`arc_peak > 0`, the arrow's lob) and a straight line (`arc_peak == 0`, planned for
+the fireball), and optional `face_travel` orientation (aim the holder's −Z down the path) so a
+shaft noses along its flight while a shape with no forward (a glowing sphere) ignores it. `Unit`
+keeps the dispatch (`play_attack_animation` → `_play_arrow`) and owns only the arrow's *look*; the
+bonk + death animations stay on `Unit` (tied to its body/hat) and will reach a future `Boss` via
+`extends Unit` inheritance.
+
+**Why:** A projectile is a world-space presentation effect decoupled from any unit (like a damage
+number); making it generic on the visual + arc keeps one flight serving arrows, fireballs, thrown
+rocks, etc. A static `UnitAnimations` module was rejected — it would force exposing `Unit`'s
+internals (`_body`/`_hat`/`_mesh_height`/`_solid_material`), and inheritance already shares the
+body-coupled animations across unit types for free.
+
+**Targeting display:** the attack phase now outlines the *whole* reach band with the move-range
+black outline (`show_move_range`, so a ranged band shows its outer edge plus the point-blank hole)
+and fills orange *only* the band tiles holding an enemy — orange marks who you can hit, the outline
+marks where the weapon reaches.
+
+---
+
 ## 2026-06-21 — Combat first pass: generic attack pipeline (range → target → resolve → animate), mechanics split from presentation
 
 **Decision:** Built a deliberately *generic* attack pipeline so melee, arrows, and spells are

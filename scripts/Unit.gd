@@ -29,6 +29,17 @@ enum Allegiance {
 	ENEMY,   ## The opposing side.
 }
 
+## What the unit's *current weapon* does, which decides whether the "Attack" action runs the
+## melee pipeline or the ranged one (see `basic_attack`). A per-unit value (not a `StatBlock`
+## field) because, like `current_hp`/`ct`, it's live unit state — eventually set by the equipped
+## weapon item; for now defaulted from the class (archers carry a bow). It does NOT *sum* across
+## base/growth/aptitude the way stat numbers do, which is exactly why it lives here off the
+## shared, summed `StatBlock` template.
+enum WeaponType {
+	MELEE,   ## Reach-1 physical strike (the bonk) — soldiers, mages for now.
+	RANGED,  ## A bow: the 3..6 arcing arrow shot.
+}
+
 # --- Identity (editable in the Inspector AND settable from code via configure) -
 
 ## Which side this unit fights for; drives the body color.
@@ -36,6 +47,17 @@ enum Allegiance {
 
 ## This unit's class; drives the hat shape + color (see UnitClasses).
 @export var unit_class: UnitClasses.Class = UnitClasses.Class.SOLDIER
+
+## What the current weapon does (see WeaponType). Defaulted from the class wherever the class
+## is (re)applied — `_apply_appearance` — so archers come up RANGED and everyone else MELEE,
+## without re-deriving it in four places. The "Attack" action reads this to pick the pipeline.
+var weapon_type: WeaponType = WeaponType.MELEE
+
+## The spells this unit knows — `Attack` profiles surfaced under the "Spell" menu (each costs MP).
+## Defaulted from the class wherever the class is applied (mage → Fireball), the same way as
+## `weapon_type`; a real spell-learning/job system will later grow this list independently of
+## class. The "Spell" menu option only appears when this is non-empty (see `has_spells`).
+var known_spells: Array[Attack] = []
 
 ## The unit's tile address on the battlefield grid, deliberately *decoupled* from
 ## its world position (docs/GAME_DESIGN.md §8). The mover (Main, later the turn
@@ -105,10 +127,27 @@ const _BONK_STICK_SIZE := Vector3(0.14, 0.14, 0.75)       ## Chunky rod, long al
 const _BONK_RAISED_DEG := -55.0                            ## Stick angle wound back, pre-swing.
 const _BONK_STRUCK_DEG := 35.0                             ## Stick angle at the bottom of the swing.
 const _BONK_RECOIL_DEG := -20.0                            ## Settle angle after the hit.
-const _BONK_LOAD_TIME := 0.35                              ## Seconds held wound-back before swinging (the "load").
+const _BONK_LOAD_TIME := 0.18                              ## Seconds held wound-back before swinging (the "load").
 const _BONK_DOWN_TIME := 0.28                              ## Seconds for the (slow, accelerating) downswing.
 const _BONK_HOLD_TIME := 0.18                              ## Seconds paused at impact — a readable beat.
 const _BONK_UP_TIME := 0.18                                ## Seconds for the recoil.
+
+## Arrow projectile tunables — a thin black rod that arcs from the attacker's head to the
+## target's head. The flight time is constant (not distance-scaled) so it reads the same at any
+## range; the arc rises this many world units above the straight chord at its peak.
+const _ARROW_COLOR := Color(0.04, 0.04, 0.04)             ## Near-black shaft.
+const _ARROW_LENGTH := 0.6                                 ## Long axis of the rod.
+const _ARROW_RADIUS := 0.04                                ## Thin — reads as a shaft, not a pole.
+const _ARROW_FLIGHT_TIME := 0.55                           ## Seconds from loose to impact.
+const _ARROW_ARC_HEIGHT := 2.2                             ## Peak rise above the start→end chord.
+
+## Fireball projectile tunables — a glowing red-orange orb that flies STRAIGHT (no arc) to the
+## target. The bloom comes from a bright HDR emission (energy ≫ 1) lifting it over the
+## WorldEnvironment's glow threshold; tune `_FIREBALL_GLOW_ENERGY` (and the env glow) for more/less.
+const _FIREBALL_COLOR := Color(1.0, 0.35, 0.06)           ## Firey red-orange.
+const _FIREBALL_RADIUS := 0.30                             ## Orb size.
+const _FIREBALL_GLOW_ENERGY := 6.0                         ## Emission multiplier — high, for strong bloom.
+const _FIREBALL_FLIGHT_TIME := 0.45                        ## Seconds from cast to impact (flat, quick).
 
 ## Death animation tunables — tip over sideways, then fade out (both eased slow for readability).
 const _DEATH_FALL_TIME := 0.55                             ## Seconds to topple to the ground.
@@ -317,11 +356,29 @@ func stats_panel_text() -> String:
 
 # --- Combat ------------------------------------------------------------------
 
-## The basic attack this unit performs from the "Attack" action. For now every unit uses the
-## default physical melee (reach 1); later this will come from the unit's class/abilities, so
-## an archer's basic attack could be a longer-range shot. Returns a fresh profile each call.
-func physical_attack() -> Attack:
-	return Attack.physical_melee()
+## The basic attack this unit performs from the "Attack" action, chosen by its current
+## `weapon_type`: a bow gives the 3..6 arrow shot, anything else the reach-1 melee bonk. This is
+## the seam the menu uses — pick the weapon, get the matching pipeline (range band, targeting,
+## animation) for free. Returns a fresh profile each call.
+func basic_attack() -> Attack:
+	match weapon_type:
+		WeaponType.RANGED:
+			return Attack.physical_ranged()
+		_:
+			return Attack.physical_melee()
+
+
+## Whether this unit knows at least one spell — gates the "Spell" action in the turn menu so it
+## only appears for casters.
+func has_spells() -> bool:
+	return not known_spells.is_empty()
+
+
+## Spend `amount` MP, never below 0. Called when a spell commits (after the caller has confirmed
+## the unit could afford it). Like `apply_damage`, this just mutates the live pool; affordability
+## is decided by the caller (the spell menu greys out what you can't pay for).
+func spend_mp(amount: int) -> void:
+	current_mp = maxi(0, current_mp - amount)
 
 
 ## Subtract `amount` from this unit's live HP, never below 0. The attacker's resolver computed
@@ -345,6 +402,10 @@ func play_attack_animation(anim_kind: int, target_position: Vector3) -> void:
 	match anim_kind:
 		Attack.AnimKind.BONK:
 			await _play_bonk(target_position)
+		Attack.AnimKind.ARROW:
+			await _play_arrow(target_position)
+		Attack.AnimKind.FIREBALL:
+			await _play_fireball(target_position)
 		_:
 			await _play_bonk(target_position)
 
@@ -383,6 +444,68 @@ func _play_bonk(target_position: Vector3) -> void:
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	await swing.finished
 	pivot.queue_free()
+
+
+## The arrow shot: loose a thin black rod that arcs from this unit's head to the target's head,
+## then return when it lands. `target_position` is the target's *base* (what
+## `play_attack_animation` is handed); both endpoints are lifted by a body-height so the shot goes
+## head-to-head (units are uniform, so our own body height stands in for theirs). The *motion* is
+## delegated to the generic `Projectile` effect — we only build the look (an archer's arrow) and
+## hand it the launch/land points; a future fireball spawns a glowing sphere through the same call
+## with `arc_peak = 0` for a flat shot.
+func _play_arrow(target_position: Vector3) -> void:
+	var lift := Vector3.UP * _mesh_height(_body.mesh)
+	var start := global_position + lift
+	var end := target_position + lift
+	# arc_peak > 0 → it lobs; face_travel → the shaft noses along its path (built pointing down −Z).
+	await Projectile.launch(get_parent(), start, end, _make_arrow_visual(),
+		_ARROW_FLIGHT_TIME, _ARROW_ARC_HEIGHT, true)
+
+
+## Build the arrow's visual: a thin black rod laid along its own local −Z (rotate the Y-aligned
+## cylinder −90° about X) so `Projectile`'s `face_travel` look-at — which aims −Z — points the shaft
+## along its flight. Returned detached; `Projectile` parents and moves it.
+func _make_arrow_visual() -> MeshInstance3D:
+	var rod := MeshInstance3D.new()
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = _ARROW_RADIUS
+	mesh.bottom_radius = _ARROW_RADIUS
+	mesh.height = _ARROW_LENGTH
+	rod.mesh = mesh
+	rod.material_override = _solid_material(_ARROW_COLOR)
+	rod.rotation.x = -PI / 2.0
+	return rod
+
+
+## The fireball cast: hurl a glowing orb in a STRAIGHT line from this unit's head to the target's
+## head, then return when it lands. Same head-to-head framing as the arrow (both endpoints lifted a
+## body-height), but delegated to `Projectile` with `arc_peak = 0` (no lob) and `face_travel = false`
+## (a sphere has no nose to point). The orb's bloom is its own emissive material; `Projectile` only
+## moves it.
+func _play_fireball(target_position: Vector3) -> void:
+	var lift := Vector3.UP * _mesh_height(_body.mesh)
+	var start := global_position + lift
+	var end := target_position + lift
+	await Projectile.launch(get_parent(), start, end, _make_fireball_visual(),
+		_FIREBALL_FLIGHT_TIME, 0.0, false)
+
+
+## Build the fireball's visual: a glowing red-orange sphere. Emission is enabled and driven well
+## past 1.0 (HDR) so it clears the WorldEnvironment's glow threshold and blooms; the albedo matches
+## so the core reads solid. Returned detached; `Projectile` parents and flies it.
+func _make_fireball_visual() -> MeshInstance3D:
+	var orb := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = _FIREBALL_RADIUS
+	mesh.height = _FIREBALL_RADIUS * 2.0   # height = diameter, or the sphere comes out squashed
+	orb.mesh = mesh
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = _FIREBALL_COLOR
+	mat.emission_enabled = true
+	mat.emission = _FIREBALL_COLOR
+	mat.emission_energy_multiplier = _FIREBALL_GLOW_ENERGY
+	orb.material_override = mat
+	return orb
 
 
 ## Play the death animation — topple sideways onto the ground, then fade to transparent — and
@@ -424,7 +547,31 @@ func _apply_appearance() -> void:
 	_hat.mesh = UnitClasses.new_hat_mesh(unit_class)
 	_hat.material_override = _solid_material(UnitClasses.hat_color(unit_class))
 
+	# The class also picks the default combat loadout (until equipment / spell-learning exist), so
+	# set both here on the one code path that applies a class — a reclass swaps the weapon and the
+	# starting spell list to the new class's defaults.
+	weapon_type = default_weapon_for_class(unit_class)
+	known_spells = default_spells_for_class(unit_class)
+
 	_layout()
+
+
+## The default weapon a fresh unit of `klass` carries: archers come up with a bow (RANGED),
+## everyone else with a melee weapon. A `static` lookup (no unit state needed) so spawn code
+## and `_apply_appearance` share one rule; equipment will later override the stored field.
+static func default_weapon_for_class(klass: int) -> WeaponType:
+	return WeaponType.RANGED if klass == UnitClasses.Class.ARCHER else WeaponType.MELEE
+
+
+## The spells a fresh unit of `klass` starts knowing: the Mage opens with Fireball; other classes
+## know none for now. Returns a fresh, typed list each call (the `Attack` profiles are rebuilt) so
+## no two units share a spell resource. A spell-learning system will later add to a unit's list
+## beyond this class default.
+static func default_spells_for_class(klass: int) -> Array[Attack]:
+	var spells: Array[Attack] = []
+	if klass == UnitClasses.Class.MAGE:
+		spells.append(Attack.fireball())
+	return spells
 
 
 ## Seat the body's feet at local y=0 and rest the hat on top of the body. Both
