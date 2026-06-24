@@ -220,6 +220,9 @@ The move to **node composition + signals** as the battle architecture landed wit
       sessions. The natural home is the `RunState` work (it would own this) — see the run-loop item.
 - [ ] **Loadout menu polish** — character portrait art (the frame is a placeholder); maybe show
       MOV/JMP/SPD only if they ever change; a "reset to default kit" option; controller/gamepad nav.
+- [ ] **Menu polish pass (all scenes)** — more loadout-menu font/proportion/layout fixes (the bump in
+      `38539f1` was a first pass), and a general look-and-feel polish across every menu/HUD (loadout +
+      battle action/spell/status/shift/end screens) so they read as one consistent, tuned UI.
 - [x] **Equipment + multiplicative damage model** — weapons/armor now carry a chunk of the damage
       budget (the fix for "everything does 1 damage"). `offense = round(atk × weapon.power)`,
       `mitigation = round(def × Σarmor × scale)`, two global knobs (`ARMOR_PHYS_SCALE 0.16` /
