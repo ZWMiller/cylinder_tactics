@@ -6,6 +6,61 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-23 — Equipment + multiplicative damage model (two armor scale knobs)
+
+**Decision:** Damage moved from subtractive `atk − def` to a MULTIPLICATIVE model where equipment
+carries a chunk of the budget — equipment is part of the balance methodology, not bolted on after:
+
+```
+offense    = round(atk_stat × equipped_weapon.power)        # unarmed power = 1.0
+mitigation = round(def_stat × Σ(equipped armor) × scale)    # unarmored Σ = 0 → no mitigation
+damage     = max(1, offense − mitigation)
+```
+
+`round` is round-half-up (`floor(x + 0.5)`). Physical reads `phys_atk`/`phys_def`, magical
+`mag_atk`/`mag_def`; the channel comes off the `Attack`. **Asymmetric baselines** are deliberate:
+unarmed offense = 1.0 (raw stat *is* your damage; weapons scale it), but unarmored mitigation = 0
+(the defense STAT is a multiplier on armor — it does nothing without armor). So an undefended unit
+takes full hits, by design.
+
+**Two global knobs**, one per channel, are the single dials for "how effective is armor vs damage":
+`CombatResolver.ARMOR_PHYS_SCALE = 0.16`, `ARMOR_MAG_SCALE = 0.18`. Armor pieces are authored as
+chunky integers; the knob converts the summed armor into felt mitigation. This decouples *global*
+armor strength (one number) from *per-piece* tuning (a local edit) — the explicit goal was a single
+lever for overall feel without re-balancing every piece, and separate phys/magic levers so the two
+lethalities tune independently.
+
+**Slots:** two hands (1H + offhand, or a 2H weapon filling both; shield is a HAND item) + head/chest/
+boots. Armor (incl. shield) SUMS across all worn slots, then × def stat × knob. **Requirements:** each
+weapon has a `StatBlock` of stat floors to wield (a frail mage can't lift a Bastard Sword); checked
+against effective `max_stats`, unmet items silently skip. Weapon `accuracy` (1.0 everywhere) is wired
+as a dormant hook for the future `attacker_acc × weapon_acc − dodge` hit formula.
+
+**Equal-budget armor sets** (Cloth/Leather/Chainmail/Plate each total 14 defense, split along the
+phys↔mag axis) so armor is a *trade-off*, not a power ladder — no "wear plate or die." Combined with
+the class def stat as the multiplier, soldiers naturally favor phys armor and mages mag armor, but a
+mixed enemy comp rewards the all-rounder (Chainmail). Full numbers + reasoning in `docs/EQUIPMENT.md`.
+
+**Set bonuses** reward committing to a full set (head+chest+boots same `set_id`), not partial mixing:
+Cloth grants +1 mag_atk / +1 evasion as a complete set. Defined centrally (`Equipment.set_bonus`),
+applied in `Unit._active_set_bonus` (folded into `max_stats` like aptitude). `evasion` reuses the
+reserved StatBlock "dodge" field — stored/shown now, inert until the accuracy/dodge hit formula lands.
+
+**Catalog built in code** (`Equipment.straight_sword()` etc.), same pattern as the `Attack`
+factories, until a loot/inventory system authors `.tres`. **Where the budget lives** was the real
+upstream decision (FFT-style: weapons/armor own much of the spread), settled before any number
+tuning. Verified end-to-end: the wired pipeline reproduces the agreed table (bastard→plate 10,
+bow→plate 5, staff-fireball→plate 12, wand-fireball→cloth 3).
+
+**Alternatives rejected:** (1) balance the raw/unarmed game first, then layer equipment — rejected as
+double-counting (you'd re-tune from scratch once weapons land). (2) Per-piece fractional armor with
+no knob — rejected; harder to tune globally and felt fiddly. (3) `ARMOR_MAG_SCALE = 0.14` (the value
+that perfectly hit the wand's 9-on-plate AND 4-on-cloth targets) — rejected because it flattened the
+mage's magic-defense choice (cloth ≈ plate); kept 0.18 for a meaningful cloth/plate gap, accepting
+wand-on-cloth lands at 3 not 4.
+
+---
+
 ## 2026-06-22 — Win/lose end screen + `_game_over` latch
 
 **Decision:** A battle ends when one side is wiped. `Main._check_battle_end` (called at the end of

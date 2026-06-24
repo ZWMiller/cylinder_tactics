@@ -204,13 +204,19 @@ The move to **node composition + signals** as the battle architecture landed wit
 `TurnManager` extraction — logged in `docs/DECISION_LOG.md` (2026-06-21).
 
 ## Polish / nice-to-have
-- [ ] **Combat balance pass — fights are too long/tedious.** With the subtractive `atk − def`
-      formula (floored at 1) and small atk/def stats, many matchups bottom out at **1 damage per
-      hit**, so chewing through a ~30 HP pool takes forever — especially since a unit can attack only
-      once per turn. Re-tune so combat resolves in a satisfying number of rounds. Levers to weigh:
-      lower HP pools (or raise damage), widen the atk–def spread so hits land 3–8 not 1, weapon/spell
-      power multipliers (ranged/spell tuning was deferred — `Attack` damage is still plain `atk−def`),
-      and revisit the small-numbers philosophy in `docs/GAME_DESIGN.md`/`DECISION_LOG.md` if needed.
+- [x] **Equipment + multiplicative damage model** — weapons/armor now carry a chunk of the damage
+      budget (the fix for "everything does 1 damage"). `offense = round(atk × weapon.power)`,
+      `mitigation = round(def × Σarmor × scale)`, two global knobs (`ARMOR_PHYS_SCALE 0.16` /
+      `ARMOR_MAG_SCALE 0.18`). Two hand + three armor slots on `Unit`; 8 weapons + 4 equal-budget
+      armor sets + shield with wield requirements; `Equipment` resource + in-code catalog
+      (`scripts/items/Equipment.gd`); accuracy hook wired (dormant). Class default loadouts at spawn.
+      See `docs/EQUIPMENT.md` + `docs/DECISION_LOG.md` (2026-06-23).
+- [ ] **Combat balance pass — playtest tuning.** The equipment math above replaces the old
+      bottom-out-at-1 subtractive formula; the next step is *feel it in real fights* and tune the two
+      `ARMOR_*_SCALE` knobs + individual `power`/`armor_*` values. Open questions to validate in play:
+      does a plate soldier feel right vs medium weapons (currently ~5–7/hit)? is the wand too chippy?
+      do HP pools (~16–35) and the 2-action/1-offensive budget give a satisfying round count? Revisit
+      the small-numbers philosophy in `docs/GAME_DESIGN.md` only if the multiplicative spread fights it.
 - [ ] Live-update visible stat blocks (HP/MP/CT) — the `StatPanel` (hover) and `StatusPanel`
       (status box) call `Unit.stats_panel_text()` once when shown, so a block on screen when a
       unit takes damage / spends MP / charges CT shows stale numbers. Refresh while visible

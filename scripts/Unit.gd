@@ -64,6 +64,23 @@ var known_spells: Array[Attack] = []
 ## system) updates this; `move_to` only handles the *visual* glide.
 var grid_coord: Vector2i = Vector2i.ZERO
 
+# --- Equipment (weapons + armor that feed the combat math) -------------------
+# The mount points: two hands (a weapon and a shield/offhand, or one two-hander filling
+# both) plus head/chest/boots armor. Gear supplies the multiplicative damage model's
+# weapon `power` and summed `armor_phys/mag` (see docs/EQUIPMENT.md and `CombatResolver`),
+# and may carry stat-rider `modifiers` folded into `max_stats`. Set at spawn from the class
+# default loadout; a real inventory/equip UI lands with the loot system.
+
+## The two hand mounts, front = main hand. A two-handed weapon sits in `hands[0]` with
+## `hands[1]` left null. Entries are `Equipment` or null. Iterated for weapon power, armor,
+## and modifiers, so it stays a plain list rather than two named vars.
+var hands: Array[Equipment] = [null, null]
+
+## The three armor mounts. Each is an `Equipment` (slot HEAD/CHEST/BOOTS) or null.
+var armor_head: Equipment = null
+var armor_chest: Equipment = null
+var armor_boots: Equipment = null
+
 # --- Stats (class base + per-person aptitude + banked level-up growth) ---------
 # Effective max stats = current class base + banked growth + aptitude:
 #   - `unit_class` (above) selects the base profile (and appearance),
@@ -180,6 +197,7 @@ func _ready() -> void:
 		recompute_stats()
 		current_hp = max_stats.max_hp
 		current_mp = max_stats.max_mp
+		_apply_default_loadout()   # gear the appearance-only path too (needs max_stats first)
 	# Idle until something calls `move_to`; no need to run `_process` every frame.
 	set_process(false)
 
@@ -272,6 +290,8 @@ func init_from_recruit(r: Recruit) -> void:
 	recompute_stats()
 	current_hp = max_stats.max_hp
 	current_mp = max_stats.max_mp
+	# Gear depends on `max_stats` (requirement checks), so equip the class default loadout last.
+	_apply_default_loadout()
 
 
 ## Recompute `max_stats` from current class base + banked level-up growth + aptitude,
@@ -283,7 +303,10 @@ func recompute_stats() -> void:
 	# unit still functions (zeroed) instead of crashing on a null base.
 	var base: StatBlock = cd.base if cd != null and cd.base != null else StatBlock.new()
 	var banked := UnitClasses.banked_growth(level_history)
-	max_stats = base.combined(banked).combined(_aptitude()).clamped_nonneg()
+	# Effective = class base + banked growth + aptitude + equipment riders, then floored at 0.
+	# Equipment modifiers (e.g. the Rapier's +1 speed) fold in here like aptitude, so re-equipping
+	# is just another recompute.
+	max_stats = base.combined(banked).combined(_aptitude()).combined(_equipment_modifiers()).clamped_nonneg()
 	current_hp = mini(current_hp, max_stats.max_hp)
 	current_mp = mini(current_mp, max_stats.max_mp)
 
@@ -345,12 +368,13 @@ func stats_panel_text() -> String:
 	var s := max_stats
 	# CT (Charge Time) is live initiative progress, shown beside SPD (its charge rate) as
 	# current/threshold — TurnManager.CT_THRESHOLD is the bar a unit fills to take its turn.
-	return "%s — L%d %s\nEXP %d/%d\nHP %d/%d   MP %d/%d\nMOV %d  JMP %d  SPD %d  CT %d/%d\nPATK %d  MATK %d\nPDEF %d  MDEF %d" % [
+	return "%s — L%d %s\nEXP %d/%d\nHP %d/%d   MP %d/%d\nMOV %d  JMP %d  SPD %d  CT %d/%d\nPATK %d  MATK %d\nPDEF %d  MDEF %d  EVA %d\n%s" % [
 		display_name(), level, UnitClasses.display_name(unit_class),
 		current_exp, EXP_PER_LEVEL,
 		current_hp, s.max_hp, current_mp, s.max_mp,
 		s.move, s.jump, s.speed, ct, TurnManager.CT_THRESHOLD,
-		s.phys_atk, s.mag_atk, s.phys_def, s.mag_def,
+		s.phys_atk, s.mag_atk, s.phys_def, s.mag_def, s.evasion,
+		equipment_summary(),
 	]
 
 
@@ -366,6 +390,137 @@ func basic_attack() -> Attack:
 			return Attack.physical_ranged()
 		_:
 			return Attack.physical_melee()
+
+
+## The damage multiplier from the equipped weapon matching `power_channel` (an `Attack.Power`):
+## a physical attack reads an equipped physical weapon, a magical attack an equipped staff/wand.
+## Returns 1.0 (the unarmed baseline — raw atk stat *is* the damage) when no matching weapon is
+## held, so a weaponless unit still fights. `CombatResolver` multiplies the atk stat by this.
+func weapon_power_for(power_channel: int) -> float:
+	var want := Equipment.Channel.PHYSICAL if power_channel == Attack.Power.PHYSICAL else Equipment.Channel.MAGICAL
+	for h in hands:
+		if h != null and h.channel == want:
+			return h.power
+	return 1.0
+
+
+## Sum of this unit's armor in one channel (`physical` → armor_phys, else armor_mag) across every
+## equipped piece — hands (shields) plus the three armor slots. Empty mounts contribute 0. This is
+## the `armor_*_total` the mitigation formula multiplies by the defense stat and the scale knob.
+func armor_total(physical: bool) -> float:
+	var total := 0.0
+	for e in _all_equipment():
+		total += e.armor_phys if physical else e.armor_mag
+	return total
+
+
+## The accuracy multiplier from the equipped weapon for `power_channel`, defaulting to 1.0.
+## A dormant hook for the future hit-chance formula (see `CombatResolver.hit_chance`); nothing
+## reads it yet, but it travels with the gear so evasion can plug in without re-plumbing.
+func weapon_accuracy_for(power_channel: int) -> float:
+	var want := Equipment.Channel.PHYSICAL if power_channel == Attack.Power.PHYSICAL else Equipment.Channel.MAGICAL
+	for h in hands:
+		if h != null and h.channel == want:
+			return h.accuracy
+	return 1.0
+
+
+## Whether this unit meets `item`'s requirement floors (checked field-by-field against the
+## current effective `max_stats`). A null/absent requirement is always satisfiable; before stats
+## are computed we allow it (spawn equips after `recompute_stats`). This is the strength/speed/
+## magic gate — a frail mage fails a Bastard Sword's phys_atk floor.
+func can_equip(item: Equipment) -> bool:
+	if item == null or item.requirements == null or max_stats == null:
+		return true
+	var r := item.requirements
+	var s := max_stats
+	return s.max_hp >= r.max_hp and s.max_mp >= r.max_mp and s.move >= r.move \
+		and s.jump >= r.jump and s.speed >= r.speed and s.phys_atk >= r.phys_atk \
+		and s.mag_atk >= r.mag_atk and s.phys_def >= r.phys_def and s.mag_def >= r.mag_def
+
+
+## Equip `item` into its slot and recompute stats (its modifiers may change them). Returns false
+## without changing anything if requirements aren't met. A two-handed weapon fills both hands; a
+## one-hander bumps off a held two-hander first, then takes the first free hand (else the main).
+func equip(item: Equipment) -> bool:
+	if not can_equip(item):
+		return false
+	match item.slot:
+		Equipment.Slot.HAND:
+			if item.hands >= 2:
+				hands[0] = item
+				hands[1] = null   # a two-hander occupies both mounts
+			else:
+				if hands[0] != null and hands[0].hands >= 2:
+					hands[0] = null   # drop the held two-hander to free a hand
+				if hands[0] == null:
+					hands[0] = item
+				elif hands[1] == null:
+					hands[1] = item
+				else:
+					hands[0] = item   # both full → replace main hand
+		Equipment.Slot.HEAD:
+			armor_head = item
+		Equipment.Slot.CHEST:
+			armor_chest = item
+		Equipment.Slot.BOOTS:
+			armor_boots = item
+	recompute_stats()
+	return true
+
+
+## Every non-null equipped piece, hands then armor — the one place that enumerates the mounts, so
+## armor-summing and modifier-folding share a single definition of "what's equipped".
+func _all_equipment() -> Array[Equipment]:
+	var out: Array[Equipment] = []
+	for h in hands:
+		if h != null:
+			out.append(h)
+	for a in [armor_head, armor_chest, armor_boots]:
+		if a != null:
+			out.append(a)
+	return out
+
+
+## The summed stat riders folded into `max_stats` by `recompute_stats`: each piece's own `modifiers`
+## (e.g. Rapier +1 speed) PLUS the set bonus if a full matching armor set is worn. Empty block when
+## nothing applies.
+func _equipment_modifiers() -> StatBlock:
+	var sum := StatBlock.new()
+	for e in _all_equipment():
+		if e.modifiers != null:
+			sum = sum.combined(e.modifiers)
+	var bonus := _active_set_bonus()
+	if bonus != null:
+		sum = sum.combined(bonus)
+	return sum
+
+
+## The set bonus a unit currently earns, or null. Requires all three armor slots filled with the
+## SAME non-empty `set_id` (e.g. full Cloth) — a partial set grants nothing. Set bonuses are defined
+## centrally in `Equipment.set_bonus`.
+func _active_set_bonus() -> StatBlock:
+	if armor_head == null or armor_chest == null or armor_boots == null:
+		return null
+	var id := armor_head.set_id
+	if id == &"" or armor_chest.set_id != id or armor_boots.set_id != id:
+		return null
+	return Equipment.set_bonus(id)
+
+
+## A short gear line for the inspect panel: the active weapon (name × power) and the summed
+## armor (phys/mag), so the equipment driving the combat math is visible on hover.
+func equipment_summary() -> String:
+	var weapon := "unarmed"
+	for h in hands:
+		if h != null and h.channel != Equipment.Channel.NONE:
+			weapon = "%s x%.2f" % [h.display_name, h.power]
+			break
+	var line := "GEAR %s\nARMOR %d/%d" % [weapon, int(armor_total(true)), int(armor_total(false))]
+	# Show the active set name so the set bonus reads as "on" at a glance (e.g. "[cloth set]").
+	if _active_set_bonus() != null:
+		line += "  [%s set]" % armor_head.set_id
+	return line
 
 
 ## Whether this unit knows at least one spell — gates the "Spell" action in the turn menu so it
@@ -572,6 +727,39 @@ static func default_spells_for_class(klass: int) -> Array[Attack]:
 	if klass == UnitClasses.Class.MAGE:
 		spells.append(Attack.fireball())
 	return spells
+
+
+## The starting gear a fresh unit of `klass` carries (until inventory/loot exists): the three
+## battle archetypes from the balance pass — a Soldier with sword + shield + chainmail (the
+## all-rounder), an Archer with bow + leather, a Mage with staff + cloth. Returns fresh
+## `Equipment` instances each call so no two units share an item resource.
+static func default_loadout_for_class(klass: int) -> Array[Equipment]:
+	var kit: Array[Equipment] = []
+	match klass:
+		UnitClasses.Class.SOLDIER:
+			kit.append(Equipment.straight_sword())
+			kit.append(Equipment.shield())
+			kit.append_array(Equipment.chainmail_set())
+		UnitClasses.Class.ARCHER:
+			kit.append(Equipment.bow())
+			kit.append_array(Equipment.leather_set())
+		UnitClasses.Class.MAGE:
+			kit.append(Equipment.staff())
+			kit.append_array(Equipment.cloth_set())
+	return kit
+
+
+## Clear any held gear and equip this unit's class default loadout. Called at spawn AFTER stats
+## exist (equip checks requirements against `max_stats`). Items whose requirements aren't met are
+## silently skipped — e.g. a rolled enemy mage that rolled below the staff's MAG floor simply
+## casts unarmed (power 1.0) rather than crashing.
+func _apply_default_loadout() -> void:
+	hands = [null, null]
+	armor_head = null
+	armor_chest = null
+	armor_boots = null
+	for item in default_loadout_for_class(unit_class):
+		equip(item)
 
 
 ## Seat the body's feet at local y=0 and rest the hat on top of the body. Both
