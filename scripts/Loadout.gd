@@ -392,13 +392,13 @@ func _refresh_stats(preview: Dictionary = {}) -> void:
 		_val[key].text = str(current[key])
 		_set_delta(_dlt[key], (preview[key] - current[key]) if previewing else 0)
 
-	# TOTAL ARMOR is two channels (phys/mag); show "P/M" and a combined delta.
+	# TOTAL ARMOR is two channels (phys/mag); show "P/M" and a per-channel delta, each colored on its
+	# OWN sign (a piece can raise phys while lowering mag — they shouldn't share one color).
 	_val["ARMOR"].text = "%d/%d" % [current["ARM_P"], current["ARM_M"]]
 	if previewing and (preview["ARM_P"] != current["ARM_P"] or preview["ARM_M"] != current["ARM_M"]):
 		var dp: int = preview["ARM_P"] - current["ARM_P"]
 		var dm: int = preview["ARM_M"] - current["ARM_M"]
-		_dlt["ARMOR"].text = "%+d/%+d" % [dp, dm]
-		_dlt["ARMOR"].add_theme_color_override("font_color", _GAIN if dp + dm >= 0 else _LOSS)
+		_dlt["ARMOR"].text = "%s/%s" % [_delta_chip(dp), _delta_chip(dm)]
 	else:
 		_dlt["ARMOR"].text = ""
 
@@ -466,6 +466,13 @@ func _restore(unit: Unit, snap: Dictionary) -> void:
 	unit.armor_chest = snap["chest"]
 	unit.armor_boots = snap["boots"]
 	unit.recompute_stats()
+
+
+## One BBCode-colored "+N"/"-N" chip for the (RichText) ARMOR delta — green for a gain, red for a
+## loss, neutral for an unchanged channel — so each armor channel is colored on its own sign.
+func _delta_chip(diff: int) -> String:
+	var color: Color = _TEXT if diff == 0 else (_GAIN if diff > 0 else _LOSS)
+	return "[color=#%s]%+d[/color]" % [color.to_html(false), diff]
 
 
 ## Write the delta Label: blank for no change, else "+N"/"-N" tinted green (gain) or red (loss).
@@ -617,12 +624,14 @@ func _on_inv_panel_input(event: InputEvent) -> void:
 
 
 # --- UI construction ---------------------------------------------------------
-# Font sizes pulled out so the menu retunes in one place; kept in step with the battle HUD.
-const _STAT_FONT := 26
-const _SLOT_FONT := 30
-const _INV_FONT := 26
-const _TITLE_FONT := 40
-const _SUBTITLE_FONT := 28
+# Font sizes pulled out so the menu retunes in one place; kept in step with the battle HUD (sized up
+# so the text reads at a glance on large/high-DPI displays rather than as tiny rows).
+const _STAT_FONT := 34
+const _SLOT_FONT := 38
+const _INV_FONT := 32
+const _TITLE_FONT := 56
+const _SUBTITLE_FONT := 40
+const _HELP_FONT := 26
 
 
 ## Assemble the whole screen: backdrop, top character panel, bottom equip + inventory panels, the
@@ -668,7 +677,7 @@ func _build_top_panel() -> void:
 
 	# Portrait placeholder: a bordered square where the character art will go later.
 	var portrait := Panel.new()
-	portrait.custom_minimum_size = Vector2(190, 190)
+	portrait.custom_minimum_size = Vector2(240, 240)
 	var pstyle := StyleBoxFlat.new()
 	pstyle.bg_color = Color(0.0, 0.0, 0.0, 0.35)
 	pstyle.set_border_width_all(2)
@@ -742,15 +751,28 @@ func _make_stat_grid(defs: Array) -> GridContainer:
 		value_label.add_theme_font_size_override("font_size", _STAT_FONT)
 		value_label.add_theme_color_override("font_color", _TITLE)
 		value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		value_label.custom_minimum_size = Vector2(70, 0)
+		value_label.custom_minimum_size = Vector2(100, 0)
 		grid.add_child(value_label)
 		_val[key] = value_label
 
-		var delta_label := Label.new()
-		delta_label.add_theme_font_size_override("font_size", _STAT_FONT)
-		delta_label.custom_minimum_size = Vector2(80, 0)
-		grid.add_child(delta_label)
-		_dlt[key] = delta_label
+		# ARMOR's delta carries two independently-colored channels (phys/mag), so it's a RichTextLabel
+		# (BBCode color per part); every other stat's delta is a single-color plain Label.
+		if key == "ARMOR":
+			var armor_delta := RichTextLabel.new()
+			armor_delta.bbcode_enabled = true
+			armor_delta.fit_content = true
+			armor_delta.scroll_active = false
+			armor_delta.autowrap_mode = TextServer.AUTOWRAP_OFF
+			armor_delta.add_theme_font_size_override("normal_font_size", _STAT_FONT)
+			armor_delta.custom_minimum_size = Vector2(140, 0)
+			grid.add_child(armor_delta)
+			_dlt[key] = armor_delta
+		else:
+			var delta_label := Label.new()
+			delta_label.add_theme_font_size_override("font_size", _STAT_FONT)
+			delta_label.custom_minimum_size = Vector2(120, 0)
+			grid.add_child(delta_label)
+			_dlt[key] = delta_label
 	return grid
 
 
@@ -780,7 +802,7 @@ func _build_equip_panel() -> void:
 
 	var help := Label.new()
 	help.text = "↑/↓ select   Enter: change   Tab: browse inventory   Q/E: character"
-	help.add_theme_font_size_override("font_size", 20)
+	help.add_theme_font_size_override("font_size", _HELP_FONT)
 	help.add_theme_color_override("font_color", _DIM)
 	box.add_child(help)
 
@@ -805,7 +827,7 @@ func _build_inventory_panel() -> void:
 
 	_hint_label = Label.new()
 	_hint_label.text = "Select a slot to change it, or press Tab to browse all gear."
-	_hint_label.add_theme_font_size_override("font_size", 22)
+	_hint_label.add_theme_font_size_override("font_size", _HELP_FONT)
 	_hint_label.add_theme_color_override("font_color", _DIM)
 	box.add_child(_hint_label)
 
@@ -827,35 +849,35 @@ func _build_begin_button() -> void:
 	begin.add_theme_font_size_override("font_size", _SUBTITLE_FONT)
 	begin.anchor_left = 1.0
 	begin.anchor_right = 1.0
-	begin.offset_left = -360
+	begin.offset_left = -500
 	begin.offset_top = 28
 	begin.offset_right = -36
-	begin.offset_bottom = 84
+	begin.offset_bottom = 104
 	begin.pressed.connect(_begin_battle)
 	add_child(begin)
 
 	# Prev / next character arrows (mouse twins of Q / E), tucked under the Begin button.
 	var prev := Button.new()
 	prev.text = "◀ Q"
-	prev.add_theme_font_size_override("font_size", 24)
+	prev.add_theme_font_size_override("font_size", _HELP_FONT)
 	prev.anchor_left = 1.0
 	prev.anchor_right = 1.0
-	prev.offset_left = -360
-	prev.offset_top = 96
-	prev.offset_right = -210
-	prev.offset_bottom = 140
+	prev.offset_left = -500
+	prev.offset_top = 120
+	prev.offset_right = -280
+	prev.offset_bottom = 176
 	prev.pressed.connect(_change_member.bind(-1))
 	add_child(prev)
 
 	var next := Button.new()
 	next.text = "E ▶"
-	next.add_theme_font_size_override("font_size", 24)
+	next.add_theme_font_size_override("font_size", _HELP_FONT)
 	next.anchor_left = 1.0
 	next.anchor_right = 1.0
-	next.offset_left = -186
-	next.offset_top = 96
+	next.offset_left = -256
+	next.offset_top = 120
 	next.offset_right = -36
-	next.offset_bottom = 140
+	next.offset_bottom = 176
 	next.pressed.connect(_change_member.bind(1))
 	add_child(next)
 
