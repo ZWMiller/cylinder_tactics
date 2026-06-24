@@ -6,6 +6,60 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-23 — Pre-battle loadout scene + `PartyLoadout` autoload (cross-scene party state)
+
+**Decision:** Split the game into two scenes — a new **`Loadout.tscn`** (gear-up menu, now the
+`run/main_scene`) that runs *before* **`Main.tscn`** (the battle) — and carried the player's equipment
+choices across the scene change via a **`PartyLoadout` autoload** singleton. "Begin Battle" (behind a
+Yes/No confirm) `change_scene_to_file`s into the battle; `Main` reads the party + each member's gear
+from `PartyLoadout` instead of hardcoding the roster and class-default kits. Full write-up in
+`docs/LOADOUT.md`.
+
+**Why an autoload:** a scene change frees the old scene tree, so menu choices must live *outside* it
+to reach the battle. An autoload node is the idiomatic Godot home for global, cross-scene state
+(the module-singleton pattern). It owns the **roster** (`party`, moved out of `Main` so both scenes
+agree), each member's stored **loadout** (keyed by `Recruit`), and the shared **inventory** catalog.
+This is the deliberate **thin first cut of the planned `RunState`** (GAME_DESIGN §9) — in memory only;
+disk-saving is a logged follow-up, not built.
+
+**Inventory = unlimited catalog (owner's call):** with no loot/quantity system yet, the inventory is
+one of every catalog item, always available (equipping never depletes it; an item type can be worn by
+several members). Rejected a limited shared pool for now (needs quantity tracking + "used up" UX
+prematurely). Items a unit can't wield (fails a requirement floor) show **greyed and refuse to
+equip**, matching the spell menu's grey-out convention (rejected hiding them — the player should see
+gear they could grow into).
+
+**Default kit seeded up front, not at battle spawn (owner's call):** `PartyLoadout.ensure_seeded()`
+runs when the menu opens and, for any member without a stored loadout, mints a throwaway `Unit` to
+read its class-default kit and persists it. So the menu opens showing real gear, a never-touched
+member still fights in defaults, and **no one can start a battle with empty slots by accident** —
+while stripping a slot bare remains a valid explicit choice. (Rejected seeding only at battle-spawn:
+the menu would show empty slots first, and the guarantee belongs at party-creation time.)
+
+**The menu reuses combat code, doesn't reimplement it:** the scene spawns one **invisible `Unit` per
+member** (no `Camera3D`, so nothing renders) and drives its real `equip_to_slot`/`recompute_stats`;
+every number — including the live **±N preview** (apply hypothetical → derive → roll back) — comes
+from `Unit` stats, `CombatResolver.offense`, and `Equipment.set_bonus`. To support this, `Unit` gained
+slot-targeted `equip_to_slot`/`clear_slot`/`item_in_slot` (a `LoadoutSlot` enum naming the five
+mounts, keeping the two-hand invariant) and `active_weapon`/`active_set_id`; and the **offense term**
+`round(atk × weapon.power)` was lifted out of `CombatResolver.compute_damage` into a public
+`CombatResolver.offense(attacker, physical)` so the panel's ATTACK/MAGIC POWER read the exact damage
+math (one source of truth) rather than a copy. The panel shows **both** channels so a weapon's effect
+on each is visible at a glance.
+
+**Two guardrails added at the owner's request:** (1) "Begin Battle" pops a **Proceed to battle?
+Yes/No** confirm (a custom modal overlay, its own input-gate) — only Yes leaves the menu. (2)
+**Character switching is blocked while a slot is mid-edit** (uncommitted), so the preview's
+snapshot/restore can't be stranded on a unit the player navigated away from — they must equip or
+cancel first.
+
+**Rejected:** passing state through a custom signal/handoff instead of an autoload (fragile across a
+scene free); a `class_name` on the autoload (clashes with the autoload's own global name); building
+the menu as a `.tscn` layout (against the code-driven workflow — only a bare Control root carries the
+script, the UI is built in `_ready`).
+
+---
+
 ## 2026-06-23 — Equipment + multiplicative damage model (two armor scale knobs)
 
 **Decision:** Damage moved from subtractive `atk − def` to a MULTIPLICATIVE model where equipment

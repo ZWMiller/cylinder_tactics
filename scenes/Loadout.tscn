@@ -1,0 +1,15 @@
+[gd_scene load_steps=2 format=3]
+
+; The pre-battle equipment menu — the scene the game boots into (run/main_scene). Like the rest of
+; the project it is built CODE-DRIVEN: this .tscn is just a bare Control root carrying the script,
+; and Loadout.gd assembles every panel/label in _ready. Keeping the root a Control (a 2D/UI node)
+; means the throwaway 3D Unit nodes the script spawns to compute stats never render (no Camera3D in
+; this scene), so they're pure off-screen stat calculators. From here "Begin Battle" changes the
+; scene to Main.tscn, carrying the player's choices through the PartyLoadout autoload.
+
+[ext_resource type="Script" path="res://scripts/Loadout.gd" id="1_loadout"]
+
+[node name="Loadout" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+script = ExtResource("1_loadout")

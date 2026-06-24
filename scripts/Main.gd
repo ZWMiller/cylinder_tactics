@@ -22,12 +22,9 @@ extends Node3D
 ## time, so each `.instantiate()` is just a cheap clone of an already-loaded scene.
 const UNIT_SCENE := preload("res://scenes/Unit.tscn")
 
-## The authored player characters (hand-made `Recruit.tres` with real aptitudes), one
-## per class. `preload` resolves them at parse time, so a renamed/missing file is a
-## loud editor error rather than a silent runtime null.
-const RECRUIT_BRON := preload("res://assets/recruits/bron.tres")  # Soldier
-const RECRUIT_DART := preload("res://assets/recruits/dart.tres")  # Archer
-const RECRUIT_WISP := preload("res://assets/recruits/wisp.tres")  # Mage
+## The player roster (who the squad is) now lives on the `PartyLoadout` autoload, shared with the
+## pre-battle loadout menu so both scenes agree on the party and its gear. `Main` reads
+## `PartyLoadout.party` when spawning (see `_ready`) instead of holding its own list.
 
 ## The actions offered at the start of a turn, in menu order. "Attack" enters the targeting phase
 ## (orange reach overlay; click an enemy in range to strike) with the unit's basic weapon attack.
@@ -73,15 +70,6 @@ const DAMAGE_NUMBER_COLOR := Color(1.0, 0.5, 0.45)
 ## The input phases of a turn: choosing an action, browsing the spell submenu, placing a move, or
 ## aiming an attack. SPELL_MENU is a sub-state of the menu (the action menu stays visible beside it).
 enum Phase { MENU, SPELL_MENU, MOVE, ATTACK }
-
-## Authored player units: [grid_x, grid_z, Recruit]. Each spawns via
-## `Unit.init_from_recruit`, so it carries a real class, level, aptitude and stat
-## block — not the old appearance-only baseline.
-@onready var _player_roster := [
-	[10, 10, RECRUIT_BRON],
-	[12, 10, RECRUIT_DART],
-	[14, 10, RECRUIT_WISP],
-]
 
 ## Enemy units: [grid_x, grid_z, class, level]. Unlike PCs these have no authored
 ## file — each is rolled into a random `Recruit` (random name + aptitude) at the given
@@ -255,9 +243,10 @@ func _ready() -> void:
 	# Seed the countdown HUD with the starting value (full cadence; -1 hides it if disabled).
 	_shift_counter.set_count(_turn_manager.turns_until_transition())
 
-	# Players from authored recruits; enemies rolled from class+level into recruits.
-	for entry in _player_roster:
-		_spawn_recruit(entry[0], entry[1], Unit.Allegiance.PLAYER, entry[2])
+	# Players come from the shared party roster (and carry the loadout chosen in the menu); enemies
+	# are rolled from class+level into recruits.
+	for entry in PartyLoadout.party:
+		_spawn_recruit(entry["x"], entry["z"], Unit.Allegiance.PLAYER, entry["recruit"])
 	for entry in _enemy_roster:
 		var foe := StatRoll.random_recruit(entry[2], entry[3], _rng)
 		_spawn_recruit(entry[0], entry[1], Unit.Allegiance.ENEMY, foe)
@@ -903,6 +892,11 @@ func _spawn_recruit(x: int, z: int, side: Unit.Allegiance, recruit: Recruit) -> 
 	unit.grid_coord = Vector2i(x, z)
 	_battlefield.add_child(unit)        # fires Unit._ready (appearance + baseline stats)
 	unit.init_from_recruit(recruit)     # adopt real class/level/aptitude → max_stats, reskin
+	# Players wear the loadout chosen in the pre-battle menu (stored on PartyLoadout, keyed by
+	# recruit); it overrides the class-default kit `init_from_recruit` just equipped. A no-op for
+	# enemies (and for a player whose recruit somehow has no stored loadout — they keep the default).
+	if side == Unit.Allegiance.PLAYER:
+		PartyLoadout.apply_to(unit, recruit)
 	# Initial placement is instant (set position directly); only later moves walk.
 	unit.position = _battlefield.tile_to_world(x, z)
 
