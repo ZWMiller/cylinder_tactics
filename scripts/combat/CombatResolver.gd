@@ -38,8 +38,19 @@ static func hit_chance(_attacker: Unit, _target: Unit, _attack: Attack) -> float
 ## The channel (physical vs magical) is read off the `Attack`, selecting the atk/def stat pair,
 ## the matching equipped weapon, and the armor channel + scale knob.
 static func compute_damage(attacker: Unit, target: Unit, attack: Attack) -> int:
-	var offense := _round_half_up(float(_offense_stat(attacker, attack)) * attacker.weapon_power_for(attack.power))
-	return maxi(1, offense - _mitigation(target, attack))
+	return maxi(1, offense(attacker, attack.power == Attack.Power.PHYSICAL) - _mitigation(target, attack))
+
+
+## The OFFENSE term on its own — `round(atk_stat × equipped_weapon.power)`, the number mitigation is
+## later subtracted from. `physical` picks the channel: true → ATTACK POWER (`phys_atk` × a physical
+## weapon), false → MAGIC POWER (`mag_atk` × a staff/wand). An unmatched channel falls back to the
+## unarmed 1.0 baseline via `Unit.weapon_power_for` (the raw stat IS the damage). Exposed publicly so
+## UI — the loadout panel's ATTACK/MAGIC POWER readouts — reads the EXACT same math the damage calc
+## uses instead of re-deriving it; `compute_damage` calls it too, so the formula lives here only.
+static func offense(attacker: Unit, physical: bool) -> int:
+	var channel: int = Attack.Power.PHYSICAL if physical else Attack.Power.MAGICAL
+	var atk: int = attacker.max_stats.phys_atk if physical else attacker.max_stats.mag_atk
+	return _round_half_up(float(atk) * attacker.weapon_power_for(channel))
 
 
 ## Resolve one attack into an outcome the caller acts on. Rolls the dice against `hit_chance`
@@ -57,11 +68,6 @@ static func resolve(attacker: Unit, target: Unit, attack: Attack, rng: RandomNum
 		"roll": roll,
 		"damage": compute_damage(attacker, target, attack) if hit else 0,
 	}
-
-
-## The attacker's raw offensive stat for this attack's channel (before the weapon multiplier).
-static func _offense_stat(unit: Unit, attack: Attack) -> int:
-	return unit.max_stats.phys_atk if attack.power == Attack.Power.PHYSICAL else unit.max_stats.mag_atk
 
 
 ## The target's mitigation for this attack: defense stat × summed armor in the matching channel ×

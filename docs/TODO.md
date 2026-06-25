@@ -88,6 +88,17 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       drive both the menu greying (`ActionMenu.set_enabled`) and activation refusal. See
       `docs/DECISION_LOG.md`.
 
+- [x] **Pre-battle loadout menu** — split into two scenes: `Loadout.tscn` (now the `run/main_scene`)
+      runs before `Main.tscn`. Top third = active character portrait frame + full stat grid with live
+      **±N preview** when hovering gear (incl. ATTACK + MAGIC POWER, TOTAL ARMOR, SET BONUS checkbox);
+      bottom-left = the 5 equip slots; bottom-right = inventory (slot-filtered while editing, full
+      catalog on Tab/browse), greyed if a requirement is unmet. Choices persist across the scene
+      change via a new **`PartyLoadout` autoload** (roster + per-member loadout + shared catalog) —
+      the thin first cut of `RunState`; `Main` reads it instead of hardcoding the roster/default kits.
+      Class defaults are seeded up front so no one starts gear-less; "Begin Battle" needs a Yes/No
+      confirm; switching characters is blocked mid-edit. `Unit` gained slot-targeted
+      `equip_to_slot`/`clear_slot`/`item_in_slot` + `CombatResolver.offense`. See `docs/LOADOUT.md`.
+
 ## Next
 
 ### Next up — ranged + magic attacks, and a Spells menu
@@ -204,6 +215,14 @@ The move to **node composition + signals** as the battle architecture landed wit
 `TurnManager` extraction — logged in `docs/DECISION_LOG.md` (2026-06-21).
 
 ## Polish / nice-to-have
+- [ ] **Persist loadouts to disk** — `PartyLoadout` keeps the party's gear in memory only, so it
+      resets each launch. Save/load it (`ResourceSaver`/JSON in `user://`) so choices stick between
+      sessions. The natural home is the `RunState` work (it would own this) — see the run-loop item.
+- [ ] **Loadout menu polish** — character portrait art (the frame is a placeholder); maybe show
+      MOV/JMP/SPD only if they ever change; a "reset to default kit" option; controller/gamepad nav.
+- [ ] **Menu polish pass (all scenes)** — more loadout-menu font/proportion/layout fixes (the bump in
+      `38539f1` was a first pass), and a general look-and-feel polish across every menu/HUD (loadout +
+      battle action/spell/status/shift/end screens) so they read as one consistent, tuned UI.
 - [x] **Equipment + multiplicative damage model** — weapons/armor now carry a chunk of the damage
       budget (the fix for "everything does 1 damage"). `offense = round(atk × weapon.power)`,
       `mitigation = round(def × Σarmor × scale)`, two global knobs (`ARMOR_PHYS_SCALE 0.16` /

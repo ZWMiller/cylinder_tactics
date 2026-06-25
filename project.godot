@@ -11,9 +11,13 @@ config_version=5
 [application]
 
 config/name="cylinder_tactics"
-run/main_scene="res://scenes/Main.tscn"
+run/main_scene="res://scenes/Loadout.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
+
+[autoload]
+
+PartyLoadout="*res://scripts/PartyLoadout.gd"
 
 [display]
 

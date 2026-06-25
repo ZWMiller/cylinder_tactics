@@ -71,6 +71,13 @@ var grid_coord: Vector2i = Vector2i.ZERO
 # and may carry stat-rider `modifiers` folded into `max_stats`. Set at spawn from the class
 # default loadout; a real inventory/equip UI lands with the loot system.
 
+## The five distinct equip MOUNTS as the loadout UI addresses them: the two hands plus the three
+## armor pieces. The combat code stores hands as an array + three named armor vars, but the menu
+## (and `equip_to_slot` / `clear_slot` / `item_in_slot`) speak in these named slots so "the off
+## hand" is an explicit target, not "whichever hand `equip` happened to pick". Values map to:
+## MAIN_HAND→hands[0], OFF_HAND→hands[1], HEAD/CHEST/BOOTS→the armor vars.
+enum LoadoutSlot { MAIN_HAND, OFF_HAND, HEAD, CHEST, BOOTS }
+
 ## The two hand mounts, front = main hand. A two-handed weapon sits in `hands[0]` with
 ## `hands[1]` left null. Entries are `Equipment` or null. Iterated for weapon power, armor,
 ## and modifiers, so it stays a plain list rather than two named vars.
@@ -469,6 +476,94 @@ func equip(item: Equipment) -> bool:
 	return true
 
 
+## Equip `item` into an EXPLICIT mount (`LoadoutSlot`), the loadout menu's targeted counterpart to
+## `equip` (which auto-picks a hand). Returns false without changing anything if requirements aren't
+## met. The hand rules keep the two-hand invariant intact:
+##   - MAIN_HAND: place the item in the main hand; a two-hander also clears the off hand (it spans both).
+##   - OFF_HAND: a two-hander can't be an off-hand, so it goes to the main hand (clearing the off);
+##     otherwise, if a two-hander is currently held it's dropped to free the hand, then the item takes
+##     the off hand.
+## Armor slots simply replace. Recomputes stats afterward (modifiers/set bonus may shift them).
+func equip_to_slot(item: Equipment, slot: LoadoutSlot) -> bool:
+	if not can_equip(item):
+		return false
+	match slot:
+		LoadoutSlot.MAIN_HAND:
+			hands[0] = item
+			if item.hands >= 2:
+				hands[1] = null
+		LoadoutSlot.OFF_HAND:
+			if item.hands >= 2:
+				hands[0] = item
+				hands[1] = null
+			else:
+				if hands[0] != null and hands[0].hands >= 2:
+					hands[0] = null   # a two-hander can't share with an off-hand; drop it
+				hands[1] = item
+		LoadoutSlot.HEAD:
+			armor_head = item
+		LoadoutSlot.CHEST:
+			armor_chest = item
+		LoadoutSlot.BOOTS:
+			armor_boots = item
+	recompute_stats()
+	return true
+
+
+## Empty a single mount (the menu's "remove gear" path) and recompute. Removing is always allowed —
+## a bare slot is a valid choice.
+func clear_slot(slot: LoadoutSlot) -> void:
+	match slot:
+		LoadoutSlot.MAIN_HAND:
+			hands[0] = null
+		LoadoutSlot.OFF_HAND:
+			hands[1] = null
+		LoadoutSlot.HEAD:
+			armor_head = null
+		LoadoutSlot.CHEST:
+			armor_chest = null
+		LoadoutSlot.BOOTS:
+			armor_boots = null
+	recompute_stats()
+
+
+## What's currently in a given mount (or null) — the menu reads this to label each slot row.
+func item_in_slot(slot: LoadoutSlot) -> Equipment:
+	match slot:
+		LoadoutSlot.MAIN_HAND:
+			return hands[0]
+		LoadoutSlot.OFF_HAND:
+			return hands[1]
+		LoadoutSlot.HEAD:
+			return armor_head
+		LoadoutSlot.CHEST:
+			return armor_chest
+		LoadoutSlot.BOOTS:
+			return armor_boots
+	return null
+
+
+## The equipped OFFENSIVE weapon (first hand item with a damage channel), or null if fighting
+## unarmed. Drives the menu's weapon-name readout (offense numbers come from `offense_power`).
+func active_weapon() -> Equipment:
+	for h in hands:
+		if h != null and h.channel != Equipment.Channel.NONE:
+			return h
+	return null
+
+
+## The `set_id` of the full armor set this unit is wearing (head + chest + boots all matching), or
+## &"" if the set is incomplete/mixed. The single source of "is a set active" — `_active_set_bonus`
+## (the stat rider) and the menu's SET BONUS checkbox both read it.
+func active_set_id() -> StringName:
+	if armor_head == null or armor_chest == null or armor_boots == null:
+		return &""
+	var id := armor_head.set_id
+	if id == &"" or armor_chest.set_id != id or armor_boots.set_id != id:
+		return &""
+	return id
+
+
 ## Every non-null equipped piece, hands then armor — the one place that enumerates the mounts, so
 ## armor-summing and modifier-folding share a single definition of "what's equipped".
 func _all_equipment() -> Array[Equipment]:
@@ -500,10 +595,8 @@ func _equipment_modifiers() -> StatBlock:
 ## SAME non-empty `set_id` (e.g. full Cloth) — a partial set grants nothing. Set bonuses are defined
 ## centrally in `Equipment.set_bonus`.
 func _active_set_bonus() -> StatBlock:
-	if armor_head == null or armor_chest == null or armor_boots == null:
-		return null
-	var id := armor_head.set_id
-	if id == &"" or armor_chest.set_id != id or armor_boots.set_id != id:
+	var id := active_set_id()
+	if id == &"":
 		return null
 	return Equipment.set_bonus(id)
 
@@ -518,8 +611,9 @@ func equipment_summary() -> String:
 			break
 	var line := "GEAR %s\nARMOR %d/%d" % [weapon, int(armor_total(true)), int(armor_total(false))]
 	# Show the active set name so the set bonus reads as "on" at a glance (e.g. "[cloth set]").
-	if _active_set_bonus() != null:
-		line += "  [%s set]" % armor_head.set_id
+	var set_id := active_set_id()
+	if set_id != &"":
+		line += "  [%s set]" % set_id
 	return line
 
 
