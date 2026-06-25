@@ -11,6 +11,8 @@ in code, per the project's code-driven workflow.
 | `scripts/TileTypes.gd` | `TileTypes` | Shared terrain vocabulary: the `Type` enum + flat colors. Pure `static` namespace. |
 | `scripts/Battlefield.gd` | `Battlefield` | Generic, size-agnostic grid engine: holds states, builds tile geometry, renders/cycles. |
 | `scripts/maps/DemoMap.gd` | `DemoMap` | One concrete map *configuration*: the 3-state grassland→canyon→desert cycle, generated procedurally. |
+| `scripts/maps/MapData.gd` | `MapData` | The **saved map format** (a `Resource`): name + dimensions + an ordered list of states. Round-trips to/from the runtime nested form and saves to `.tres`. |
+| `scripts/maps/MapState.gd` | `MapState` | One time-state inside a `MapData`, as two flat `PackedInt32Array`s (heights + types). Sub-resource; never instantiated standalone. |
 
 `class_name` registers each script globally, so they reference each other by name
 (e.g. `TileTypes.Type.GRASS`) with no `preload`. None of the three is instantiated as
@@ -81,13 +83,39 @@ as a unit's `jump` stat), and each orthogonal step costs 1 `move` point.
 - `show_path(tiles, legal_flags)` / `clear_path()` — the path preview; blue legal tiles,
   red illegal ones (per `classify_path`).
 
+## Saved map format (`MapData` / `MapState`)
+
+The persistent, on-disk twin of the procedural `DemoMap` — what the map designer writes
+and what `Battlefield` can load. A **`MapData`** resource carries `map_name`, its own
+`width`/`height`, and `states: Array[MapState]` (the shift sequence). A **`MapState`**
+stores one state as two flat `PackedInt32Array`s — `heights` and `types` — laid out
+row-major in X (`index = x * height + z`).
+
+- **Why flat arrays:** Godot only serializes `@export`ed properties, and the runtime
+  nested `state[x][z] = {height, type}` form (a ragged nest of Dictionaries) round-trips
+  to an ugly, un-diff-able `.tres`. Flat `PackedInt32Array`s write as one compact line
+  each, so a saved map is small and reviewable in git.
+- **Bridging the two forms:** `MapData.to_states()` rebuilds the nested form the engine
+  uses; `MapData.from_states(states, name)` packs the nested form back into a `MapData`
+  (how `DemoMap` output or the designer's grid becomes saveable). The two share the
+  `index = x * height + z` convention so they never disagree about which cell an index
+  names.
+- **Save/load:** `data.save_to("res://assets/maps/foo.tres")` returns an `Error`;
+  `MapData.load_from(path)` returns the map or `null` if missing / wrong type. Authored
+  maps live under `res://assets/maps/`.
+
 ## Configuration
 
-Inspector-exported on the `Battlefield` node: `grid_width`, `grid_height` (default
-24×24, no upper limit), `tile_size`, `height_step`, `cap_thickness`. To use a different
-map, assign `Battlefield.states` before the node enters the tree, or swap the
-`DemoMap.generate(...)` call in `_ready()`. With `states` left empty it falls back to
-`DemoMap`.
+Inspector-exported on the `Battlefield` node: `map_data` (optional `MapData` to load),
+`grid_width`, `grid_height`, `tile_size`, `height_step`, `cap_thickness`.
+
+**Maps are variable-size.** The map source is resolved in `_ready()` in priority order:
+an assigned **`map_data`** resource → a directly-assigned **`states`** array → the
+built-in **`DemoMap`** fallback. Once a map is resolved, `_adopt_dimensions_from_states()`
+overwrites `grid_width`/`grid_height` with that map's actual size — so those two exports
+now only size the *DemoMap fallback*; a loaded map's own dimensions win. To use a
+different map: assign a `MapData` (`.tres`) to `map_data`, assign `states` before the node
+enters the tree, or swap the `DemoMap.generate(...)` call in `_ready()`.
 
 ## The demo map (3 states)
 

@@ -48,10 +48,20 @@ const _ORTHO_DIRS := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(
 
 # --- Configuration (editable in the Inspector; this is what @export means) ----
 
-## Number of tiles along the X axis. There is intentionally no upper limit.
+## Optional saved map to load — a `MapData` resource (e.g. authored in the map
+## designer, or a hand-built `.tres`). When assigned this WINS over a directly-set
+## `states` and over the DemoMap fallback, and its dimensions overwrite the
+## `grid_width`/`grid_height` below (maps are variable-size; the data is the
+## authority). Leave null to fall back to `states` or the built-in DemoMap.
+@export var map_data: MapData
+
+## Number of tiles along the X axis. NOTE: this is only the size used to GENERATE the
+## DemoMap fallback — once a real map loads (`map_data` or an assigned `states`), it is
+## overwritten with that map's width in `_ready`. There is intentionally no upper limit.
 @export var grid_width: int = 24
 
-## Number of tiles along the Z axis.
+## Number of tiles along the Z axis. Like `grid_width`, this only sizes the DemoMap
+## fallback; a loaded map's height replaces it.
 @export var grid_height: int = 24
 
 ## World-space width/depth of a single tile. Tiles are placed flush (no gap).
@@ -208,9 +218,18 @@ func _ready() -> void:
 	_active_marker.visible = false
 	add_child(_active_marker)
 
-	# If nobody supplied a map configuration, use the built-in demo.
-	if states.is_empty():
+	# Resolve the map source, in priority order: an assigned MapData resource (the
+	# saved/designed format), then a directly-assigned `states` (procedural callers),
+	# then the built-in DemoMap so the scene always shows something on F5.
+	if map_data != null:
+		states = map_data.to_states()
+	elif states.is_empty():
 		states = DemoMap.generate(grid_width, grid_height)
+
+	# Maps are variable-size, so the loaded data — not the exports — is the authority
+	# on dimensions. Adopt them before building tiles, since all the grid math
+	# (placement, BFS bounds, centering) reads grid_width/grid_height.
+	_adopt_dimensions_from_states()
 
 	_build_tiles()
 	render_state(_current_index)
@@ -704,6 +723,16 @@ func _surface_material(type: int) -> StandardMaterial3D:
 		mat.albedo_color = TileTypes.surface_color(type)
 		_surface_materials[type] = mat
 	return _surface_materials[type]
+
+
+## Set `grid_width`/`grid_height` from the resolved `states` data, so a loaded map's
+## own size drives the grid (variable-size maps). States are rectangular `state[x][z]`,
+## so width is the number of X columns and height the length of any column. Assumes at
+## least one non-empty state — guaranteed here because `_ready` always resolves a map
+## (MapData, an assigned `states`, or the DemoMap fallback) before calling this.
+func _adopt_dimensions_from_states() -> void:
+	grid_width = states[0].size()
+	grid_height = (states[0][0] as Array).size()
 
 
 ## Create the per-tile geometry once: for every grid cell, a small root node

@@ -101,6 +101,37 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
 
 ## Next
 
+### Map & tiles overhaul (current focus — branch `update-maps-and-tiles`)
+Goal: smaller, more interesting maps and real terrain-type gameplay, so playtesting feels
+better. Sequenced so the **saved map format is the linchpin** — once it exists, variable
+size falls out, the designer is "draw → save", and authoring new maps is visual instead of
+tuning falloff constants. Decided: in-game designer scene (new / load-existing / edit /
+save), maps saved as a custom `MapData` Resource (`.tres`).
+- [x] **Map format + load/save + variable size** — `MapData` / `MapState` resources
+      (`scripts/maps/`): a map carries its own `width`/`height` and an ordered list of
+      states stored as flat `PackedInt32Array`s (compact, diff-able `.tres`).
+      `to_states()`/`from_states()` bridge the runtime nested form; `save_to`/`load_from`
+      wrap `ResourceSaver`/`load`. `Battlefield` gained a `map_data` export (wins over
+      `states`/DemoMap) and `_adopt_dimensions_from_states()` so grid size now comes from
+      the data, not the exports. See `docs/BATTLEFIELD.md`.
+- [ ] **Map designer scene** — in-game scene (run with F6): paint per-tile height + terrain
+      type by mouse, support **new / load-existing / edit / save** to a `MapData` `.tres`.
+      Reuses the existing tile-picking (`tile_at_screen_point`) + Battlefield rendering;
+      needs a runtime rebuild path (re-`_build_tiles` on a resized map). Authored maps live
+      in `res://assets/maps/`.
+- [ ] **Terrain types carry gameplay** — define the type vocabulary + a per-type property
+      table (move cost, impassable, **is_liquid**, blocks-LoS, blocks-cast). Then wire:
+      per-type **movement cost** + impassable into `reachable_tiles`/`find_path`/
+      `classify_path`; **casting legality** (no cast while standing in liquid) into the
+      attack/spell phase; and **liquid depth** — recess a water tile's surface and sink the
+      cylinder *into* it so it reads as standing in water, not on it.
+- [ ] **Line-of-sight + projectile collision** — tall terrain blocks arrows/fireballs and
+      targeting (a grid/height LoS check between attacker and target; projectiles respect it).
+      Most novel/complex; its own chunk.
+- [ ] **Author new demo maps** in the designer — small, deliberately interesting battle maps
+      (chokepoints, high ground, mixed terrain) as height-state sequences; retire/retune the
+      procedural 24×24 demo cycle.
+
 ### Next up — ranged + magic attacks, and a Spells menu
 The melee pipeline was built generic for exactly this; most of the work is *data + a projectile
 animation + a conditional menu*, not new mechanics.
