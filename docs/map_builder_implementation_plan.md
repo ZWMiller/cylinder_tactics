@@ -134,7 +134,7 @@ See §5 for the full description.
 
 ---
 
-## 6. ⭐ START HERE TOMORROW — the 3 requested fixes
+## 6. ⭐ START HERE TOMORROW — the requested fixes
 
 1. **Can't change map size or name in the builder.**
    - New map is hardcoded `NEW_MAP_WIDTH/HEIGHT = 10`; there's no name editing and no resize.
@@ -155,6 +155,17 @@ See §5 for the full description.
    - Currently `popup_centered_ratio(0.6)`; it renders very small. Fix by setting an explicit
      `min_size` (e.g. `Vector2i(900, 600)`) and/or `popup_centered(Vector2i(900,600))`, and
      bump the dialog's font size (theme override) so filenames are legible on hi-res.
+
+4. **Grid outline: extend to EVERY visible tile edge (stays always-on in the builder).**
+   - In the map builder the dark grid is always on — keep it that way; just make it complete.
+     Currently `_rebuild_grid_overlay` (in `EditableBattlefield`) only draws the 4 top edges.
+     Add the **vertical edges** down each exposed cliff face (where a tile is taller than the
+     neighbor it abuts, or at the grid border) so steps/cliffs are fully outlined. Reuse the
+     same `PRIMITIVE_LINES` ArrayMesh; for each tile compare its height to each orthogonal
+     neighbor and drop a vertical line at the shared corners where there's a drop (similar in
+     spirit to the move-range outline's corner-post logic in `Battlefield.show_move_range`).
+   - SEPARATE (main game, not the builder): a player **view setting to toggle the grid on/off
+     in battle** — see TODO.md. Different feature; don't conflate with the builder's.
 
 ---
 

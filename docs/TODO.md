@@ -256,6 +256,12 @@ The move to **node composition + signals** as the battle architecture landed wit
 `TurnManager` extraction — logged in `docs/DECISION_LOG.md` (2026-06-21).
 
 ## Polish / nice-to-have
+- [ ] **Battle grid-outline view setting** — a player-toggleable option to show/hide a dark
+      outline around every tile edge during battle (off by default). The map builder already
+      draws this (always-on, via `EditableBattlefield._rebuild_grid_overlay`); promote it into
+      the base `Battlefield` as an optional overlay the main game can switch on/off, so the
+      board reads clearly for players who want it. Extend it to every visible edge, not just
+      tile tops (see `docs/map_builder_implementation_plan.md` §6.4).
 - [ ] **Persist loadouts to disk** — `PartyLoadout` keeps the party's gear in memory only, so it
       resets each launch. Save/load it (`ResourceSaver`/JSON in `user://`) so choices stick between
       sessions. The natural home is the `RunState` work (it would own this) — see the run-loop item.
