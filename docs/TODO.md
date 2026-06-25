@@ -114,11 +114,15 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       wrap `ResourceSaver`/`load`. `Battlefield` gained a `map_data` export (wins over
       `states`/DemoMap) and `_adopt_dimensions_from_states()` so grid size now comes from
       the data, not the exports. See `docs/BATTLEFIELD.md`.
-- [ ] **Map designer scene** — in-game scene (run with F6): paint per-tile height + terrain
-      type by mouse, support **new / load-existing / edit / save** to a `MapData` `.tres`.
-      Reuses the existing tile-picking (`tile_at_screen_point`) + Battlefield rendering;
-      needs a runtime rebuild path (re-`_build_tiles` on a resized map). Authored maps live
-      in `res://assets/maps/`.
+- [~] **Map designer scene** — in-game scene (`scenes/MapDesigner.tscn`, run with F6).
+      **Phase 1 DONE:** `EditableBattlefield extends Battlefield` (additive editing API +
+      designer-only grid overlay, `Battlefield.gd` untouched) + `MapDesigner.gd` (Height/
+      Surface/Body tools, terrain palette, hover cursor, New/Save/Load to `.tres`, HUD).
+      **TODO next (see `docs/map_builder_implementation_plan.md` §6):** (1) editable map
+      size + name (New is hardcoded 10×10, no rename); (2) a swatch/skill-bar palette across
+      the top; (3) the save/load FileDialog is tiny — set min_size + bigger font. **Then
+      Phase 2:** brush macros (Single/Square/Circle/Line/**Hill**, configurable size N,
+      click-drag height) via `set_tiles`. **Phase 3 (later):** multi-state editing.
 - [x] **Terrain vocabulary + property table + two-layer tiles** — `TileTypes` now holds a
       single-source-of-truth table per type: `color`, `move_cost`, `is_liquid`, `can_cast`,
       `hazard_damage` (reserved, lava placeholder). New types: `DIRT` (default body), `LAVA`,

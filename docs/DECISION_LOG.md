@@ -6,6 +6,36 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-24 — Map format, two-layer tiles, and the designer as a `Battlefield` subclass
+
+Three related decisions while starting the map/terrain overhaul (branch
+`update-maps-and-tiles`). Full plan in `docs/map_builder_implementation_plan.md`.
+
+**Saved maps = a custom `MapData` Resource (`.tres`), stored as flat `PackedInt32Array`s.**
+A map carries its own `width`/`height` (so maps are **variable-size** — `Battlefield` adopts
+them from the data), a `map_name`, and an ordered `Array[MapState]` (the shift sequence). Each
+state is three flat arrays — heights, surface types, body types — row-major (`i = x*height+z`).
+Chosen over JSON (idiomatic, inspector-editable, one-line load) and over nested
+dict-of-dict arrays (which serialize to ugly, un-diffable `.tres`). `Battlefield` gained an
+optional `map_data` export that wins over a directly-assigned `states` / the DemoMap fallback.
+
+**Tiles are two-layer: a surface/cap `type` + a side `body` type.** `type` drives the top
+color AND all gameplay (move cost, liquid, casting, hazard); `body` is the column/side color
+only (cosmetic, default `DIRT`). This lets one tile be stucco walls + a slate roof. Rejected a
+single "earth_sides" bool (couldn't give walls and roof different colors) and a full vertical
+block stack (overkill for the geometry prototype). Gameplay always reads the surface `type`.
+
+**The in-game map designer reuses `Battlefield` via a subclass, leaving `Battlefield.gd`
+untouched.** The designer must be WYSIWYG — what you paint must render identically to a battle
+(same two-layer columns, height scaling, picking) — so a second renderer was rejected (it would
+drift, e.g. when liquid sink-in lands). Resolution: **`EditableBattlefield extends Battlefield`**
+adds all editing (`load_states`/`set_tile`/`set_tiles`/`tile_data`) + a designer-only grid
+overlay, and ONLY calls existing base methods. Battle scenes use the base class / a different
+instance, so they cannot be affected. (Owner explicitly asked this be a deliberate, safe choice.)
+Designer is an in-game scene (F6), not an `EditorPlugin`; single-state editing first.
+
+---
+
 ## 2026-06-23 — Pre-battle loadout scene + `PartyLoadout` autoload (cross-scene party state)
 
 **Decision:** Split the game into two scenes — a new **`Loadout.tscn`** (gear-up menu, now the
