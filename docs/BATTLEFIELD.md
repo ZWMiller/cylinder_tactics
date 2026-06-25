@@ -8,11 +8,11 @@ in code, per the project's code-driven workflow.
 
 | File | `class_name` | Role |
 |------|--------------|------|
-| `scripts/TileTypes.gd` | `TileTypes` | Shared terrain vocabulary: the `Type` enum + flat colors. Pure `static` namespace. |
+| `scripts/TileTypes.gd` | `TileTypes` | Shared terrain vocabulary: the `Type` enum + a per-type property table (color, move cost, liquid, casting, hazard). Pure `static` namespace. |
 | `scripts/Battlefield.gd` | `Battlefield` | Generic, size-agnostic grid engine: holds states, builds tile geometry, renders/cycles. |
 | `scripts/maps/DemoMap.gd` | `DemoMap` | One concrete map *configuration*: the 3-state grassland→canyon→desert cycle, generated procedurally. |
 | `scripts/maps/MapData.gd` | `MapData` | The **saved map format** (a `Resource`): name + dimensions + an ordered list of states. Round-trips to/from the runtime nested form and saves to `.tres`. |
-| `scripts/maps/MapState.gd` | `MapState` | One time-state inside a `MapData`, as two flat `PackedInt32Array`s (heights + types). Sub-resource; never instantiated standalone. |
+| `scripts/maps/MapState.gd` | `MapState` | One time-state inside a `MapData`, as three flat `PackedInt32Array`s (heights + surface types + body types). Sub-resource; never instantiated standalone. |
 
 `class_name` registers each script globally, so they reference each other by name
 (e.g. `TileTypes.Type.GRASS`) with no `preload`. None of the three is instantiated as
@@ -20,10 +20,13 @@ an object except `Battlefield`, which is a `Node3D` in `scenes/Main.tscn`.
 
 ## Data model
 
-- **Tile** — a `Dictionary` `{ "height": int, "type": int }` (`type` is a
-  `TileTypes.Type`). A tile carries height *and* type, never just a height — type will
-  drive movement cost / casting rules later (see `docs/GAME_DESIGN.md` §7).
-  *(Kept as a Dictionary for prototype simplicity; may become a Resource later.)*
+- **Tile** — a `Dictionary` `{ "height": int, "type": int, "body": int }` (`type`/`body`
+  are `TileTypes.Type`). **Two-layer:** `type` is the **surface/cap** — the tile you stand
+  on, driving the cap color *and* gameplay (move cost, liquid, casting, hazard); `body` is
+  the **column/side** color only (cosmetic), defaulting to `DIRT`. The split lets one tile
+  be a stucco building (`body = BUILDING`) with a slate roof (`type = ROOF`). Gameplay
+  always reads the surface `type`, never the body. *(Kept as a Dictionary for prototype
+  simplicity; may become a Resource later.)*
 - **State** — a 2D grid of tiles indexed `state[x][z]`.
 - **`states`** — the ordered list of states. The shift cycles through them and wraps
   (`… → last → 0 → …`). This is the "map is a *sequence* of states" commitment from
@@ -44,12 +47,14 @@ seed of the future shared coordinate-helper module (movement / LoS / combat).
 ## Rendering (geometry only — no textures)
 
 Each tile is two scaled instances of a single shared 1×1×1 `BoxMesh`:
-- a **brown "earth" column** (`TileTypes.EARTH`) for the body/sides, and
+- a **column** for the body/sides, colored by the tile's `body` type
+  (`TileTypes.surface_color(body)` — brown `DIRT` by default, or a built-block color), and
 - a thin **colored surface cap** (`TileTypes.surface_color(type)`) on top.
 
-Height differences expose the brown column as a dirt cliff; flush neighbors hide their
-shared sides. One shared mesh + per-instance scale/`material_override` keeps ~1,150
-tile pieces cheap. A tile of height `H` rises `H * height_step` world units.
+Height differences expose the column as a cliff; flush neighbors hide their shared sides.
+`DIRT` bodies reuse one shared brown material; other body types get a cached per-type
+material (same cache as the caps). One shared mesh + per-instance scale/`material_override`
+keeps ~1,150 tile pieces cheap. A tile of height `H` rises `H * height_step` world units.
 
 ## Shift API (intentionally small and public)
 
@@ -88,8 +93,10 @@ as a unit's `jump` stat), and each orthogonal step costs 1 `move` point.
 The persistent, on-disk twin of the procedural `DemoMap` — what the map designer writes
 and what `Battlefield` can load. A **`MapData`** resource carries `map_name`, its own
 `width`/`height`, and `states: Array[MapState]` (the shift sequence). A **`MapState`**
-stores one state as two flat `PackedInt32Array`s — `heights` and `types` — laid out
-row-major in X (`index = x * height + z`).
+stores one state as three flat `PackedInt32Array`s — `heights`, `types` (surface/cap),
+and `bodies` (column/side) — laid out row-major in X (`index = x * height + z`). A
+`bodies` array missing entirely (a map saved before the field existed) falls back to
+`DIRT` per tile on load, so older maps look unchanged.
 
 - **Why flat arrays:** Godot only serializes `@export`ed properties, and the runtime
   nested `state[x][z] = {height, type}` form (a ragged nest of Dictionaries) round-trips

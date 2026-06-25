@@ -36,10 +36,13 @@ extends Resource
 
 
 ## Rebuild the runtime nested form `Battlefield` consumes: an Array (one per state) of
-## `grid[x][z] = { "height": int, "type": int }`. Inverse of `from_states`.
+## `grid[x][z] = { "height": int, "type": int, "body": int }`. Inverse of `from_states`.
+## A `bodies` array missing entirely (a map saved before bodies existed) falls back to
+## `TileTypes.DEFAULT_BODY` per tile, so older maps render with brown dirt sides as before.
 func to_states() -> Array:
 	var result: Array = []
 	for st in states:
+		var has_bodies := st.bodies.size() == st.heights.size()
 		var grid: Array = []
 		for x in width:
 			var column: Array = []
@@ -49,6 +52,7 @@ func to_states() -> Array:
 				column.append({
 					"height": st.heights[idx],
 					"type": st.types[idx],
+					"body": st.bodies[idx] if has_bodies else TileTypes.DEFAULT_BODY,
 				})
 			grid.append(column)
 		result.append(grid)
@@ -68,14 +72,18 @@ static func from_states(p_states: Array, p_name: String = "Untitled") -> MapData
 	data.height = (p_states[0][0] as Array).size()
 	for grid in p_states:
 		var st := MapState.new()
-		# Pre-size both flat arrays so we can assign by index instead of appending.
+		# Pre-size the flat arrays so we can assign by index instead of appending.
 		st.heights.resize(data.width * data.height)
 		st.types.resize(data.width * data.height)
+		st.bodies.resize(data.width * data.height)
 		for x in data.width:
 			for z in data.height:
 				var idx := x * data.height + z
-				st.heights[idx] = grid[x][z]["height"]
-				st.types[idx] = grid[x][z]["type"]
+				var tile: Dictionary = grid[x][z]
+				st.heights[idx] = tile["height"]
+				st.types[idx] = tile["type"]
+				# Tolerate tiles without an explicit body (older procedural output).
+				st.bodies[idx] = tile.get("body", TileTypes.DEFAULT_BODY)
 		data.states.append(st)
 	return data
 

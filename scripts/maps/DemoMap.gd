@@ -104,10 +104,10 @@ static func _state_canyon(width: int, height: int) -> Array:
 		var column: Array = []
 		for z in height:
 			if _is_river(x, z):
-				column.append({"height": CANYON_FLOOR, "type": TileTypes.Type.WATER})
+				column.append({"height": CANYON_FLOOR, "type": TileTypes.Type.WATER, "body": TileTypes.Type.DIRT})
 			else:
 				var h := GROUND_HEIGHT + _hill(x, z, HILL_PEAK, HILL_FALLOFF)
-				column.append({"height": h, "type": TileTypes.Type.GRASS})
+				column.append({"height": h, "type": TileTypes.Type.GRASS, "body": TileTypes.Type.DIRT})
 		state.append(column)
 	return state
 
@@ -124,8 +124,8 @@ static func _state_desert(width: int, height: int) -> Array:
 			if _is_river(x, z):
 				# Dry riverbed: stone, carved a little below the surrounding sand.
 				var bed: int = max(GROUND_HEIGHT, ground - 1)
-				column.append({"height": bed, "type": TileTypes.Type.STONE})
+				column.append({"height": bed, "type": TileTypes.Type.STONE, "body": TileTypes.Type.DIRT})
 			else:
-				column.append({"height": ground, "type": TileTypes.Type.SAND})
+				column.append({"height": ground, "type": TileTypes.Type.SAND, "body": TileTypes.Type.SAND})
 		state.append(column)
 	return state

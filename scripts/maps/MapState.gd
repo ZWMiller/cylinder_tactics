@@ -24,5 +24,12 @@ extends Resource
 @export var heights: PackedInt32Array = PackedInt32Array()
 
 ## Flat, row-major terrain types parallel to `heights` (same indexing). Each entry is a
-## `TileTypes.Type` stored as its backing int.
+## `TileTypes.Type` stored as its backing int. This is the SURFACE/cap type — the tile
+## you stand on, which drives both the cap color and gameplay (move cost, liquid, casting).
 @export var types: PackedInt32Array = PackedInt32Array()
+
+## Flat, row-major BODY (side) types parallel to `heights` — the column color only
+## (cosmetic), letting a tile be e.g. stucco-sided with a slate-roof cap. A `TileTypes.Type`
+## per entry. May be empty on maps saved before this field existed; `MapData.to_states`
+## then fills in `TileTypes.DEFAULT_BODY` (brown dirt), so old maps look unchanged.
+@export var bodies: PackedInt32Array = PackedInt32Array()

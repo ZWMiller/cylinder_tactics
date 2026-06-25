@@ -119,11 +119,17 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       Reuses the existing tile-picking (`tile_at_screen_point`) + Battlefield rendering;
       needs a runtime rebuild path (re-`_build_tiles` on a resized map). Authored maps live
       in `res://assets/maps/`.
-- [ ] **Terrain types carry gameplay** — define the type vocabulary + a per-type property
-      table (move cost, impassable, **is_liquid**, blocks-LoS, blocks-cast). Then wire:
-      per-type **movement cost** + impassable into `reachable_tiles`/`find_path`/
-      `classify_path`; **casting legality** (no cast while standing in liquid) into the
-      attack/spell phase; and **liquid depth** — recess a water tile's surface and sink the
+- [x] **Terrain vocabulary + property table + two-layer tiles** — `TileTypes` now holds a
+      single-source-of-truth table per type: `color`, `move_cost`, `is_liquid`, `can_cast`,
+      `hazard_damage` (reserved, lava placeholder). New types: `DIRT` (default body), `LAVA`,
+      `BUILDING`, `BUILDING_STONE`, `ROOF`, `QUICKSAND` (liquids: water/lava/quicksand).
+      Tiles are now **two-layer** — a surface/cap `type` (gameplay + top color) plus a `body`
+      type (side color, defaults `DIRT`), so one tile can be a stucco building with a slate
+      roof. `MapState` gained a `bodies` array; `Battlefield` colors the column by body.
+- [ ] **Wire terrain gameplay** — read the table above in play: per-type **movement cost**
+      into `reachable_tiles`/`find_path`/`classify_path`; **casting legality** (`can_cast`,
+      no cast while standing in liquid) into the attack/spell phase; **hazard_damage** (lava)
+      on enter/turn; and **liquid depth** — recess a liquid tile's surface and sink the
       cylinder *into* it so it reads as standing in water, not on it.
 - [ ] **Line-of-sight + projectile collision** — tall terrain blocks arrows/fireballs and
       targeting (a grid/height LoS check between attacker and target; projectiles respect it).

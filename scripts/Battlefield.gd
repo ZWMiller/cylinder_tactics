@@ -799,6 +799,11 @@ func render_state(index: int) -> void:
 			var earth: MeshInstance3D = refs["earth"]
 			earth.scale = Vector3(tile_size, column_h, tile_size)
 			earth.position = Vector3(0.0, column_h * 0.5, 0.0)
+			# The column (sides) are colored by the tile's BODY type — brown dirt by
+			# default, or a built-block color (e.g. stucco) so it doesn't show earth.
+			# DIRT reuses the one shared brown material; other bodies get a cached one.
+			var body_type: int = tile.get("body", TileTypes.DEFAULT_BODY)
+			earth.material_override = _earth_material if body_type == TileTypes.Type.DIRT else _surface_material(body_type)
 
 			var surface: MeshInstance3D = refs["surface"]
 			surface.scale = Vector3(tile_size, cap_h, tile_size)
