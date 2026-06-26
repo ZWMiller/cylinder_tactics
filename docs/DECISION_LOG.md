@@ -6,6 +6,55 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-25 — Map builder becomes an Encounter Builder (direction; data model deferred)
+
+**Decision (direction):** grow the map designer beyond terrain into a full **encounter
+builder** — author the fight visually alongside the map, save it, and quick-load into the
+existing battle engine to playtest. Scheduled as designer **Phase 3** (multi-state editing
+bumped to Phase 4). Full spec in `docs/map_builder_implementation_plan.md` §10.
+
+**What it authors:** enemy placements (class/weapon/armor/level + per-stat HP/MP/Speed/Move
+overrides), named characters/bosses (placement references a `Recruit`/id; boss *creation* is
+later), a player **start zone** (deploy region), and **win-objective tiles** (reach-the-tile
+victory — so the win condition isn't always elimination; keep it extensible).
+
+**Why:** authoring fights by hand in code is slow; placing units/objectives by sight, saving,
+and one-click testing in the engine we already have should make fight design dramatically
+faster. This also makes the builder the visual front-end for the planned `Encounter` resource
+(`TODO.md` "toward a reusable `Battle.tscn`").
+
+**Open / deferred (decide at Phase 3 kickoff):** the data model — (A) extend `MapData` to also
+carry the encounter (owner's "the map holds the fight too" framing, one file) vs (B) a separate
+`Encounter` resource that *references* a `MapData` + placements (keeps maps reusable, matches
+the `Encounter`→`EncounterSpawner`→`Battle.tscn` architecture). Leaning B (or a hybrid), but
+not locked. Also surfaces the **win-condition system**: `Main._check_battle_end` is
+elimination-only today and must learn objective tiles.
+
+---
+
+## 2026-06-25 — Project-wide `canvas_items` stretch for a resolution-reactive UI
+
+**Decision:** Set `display/window/stretch/mode="canvas_items"` + `aspect="expand"` in
+`project.godot` (base resolution already 1920×1080). The whole 2D UI now scales with the
+window from that base instead of rendering at fixed native pixels.
+
+**Why:** With stretch *disabled* (the prior state), HUD/menu fonts shrank on any display
+larger than 1080p (the window maximizes), so text read tiny — and hand-tuning per-widget
+font sizes can't fix it across resolutions. `canvas_items` is the idiomatic Godot answer:
+author UI sizes once at the base res, let the engine scale them. 3D still renders at native
+resolution and mouse-picking is unaffected (everything stays in base-space coordinates).
+
+**Scope/risk:** This is **global** — it scales the battle/Loadout HUDs too, not just the map
+designer. Because the base equals the existing design resolution, scenes look identical at
+1920×1080 and only scale up beyond it, so it should be non-regressive; still worth eyeballing
+the battle scenes. Easily reverted (two lines).
+
+**Also:** designer font sizes were centralized into `FONT_*` constants + a shared dialog
+`Theme` (`default_font_size`) so there's one tuning point, and the map-designer FileDialogs
+got a real `min_size` instead of the tiny `popup_centered_ratio`.
+
+---
+
 ## 2026-06-24 — Map format, two-layer tiles, and the designer as a `Battlefield` subclass
 
 Three related decisions while starting the map/terrain overhaul (branch

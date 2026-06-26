@@ -42,6 +42,11 @@ extends Camera3D
 ## Degrees per second of orbit when holding Q / E.
 @export var key_orbit_speed: float = 90.0
 
+## When false, the Q/E held-key orbit is suspended (mouse zoom / drag-orbit still work).
+## The map designer clears this while a text dialog is open so typing doesn't spin the
+## camera; defaults true so the battle camera is unaffected.
+var key_orbit_enabled: bool = true
+
 ## Degrees of orbit per pixel of middle-mouse drag.
 @export var mouse_orbit_speed: float = 0.3
 
@@ -142,10 +147,15 @@ func _process(delta: float) -> void:
 	var changed: bool = false
 
 	var turn: float = 0.0
-	if Input.is_physical_key_pressed(KEY_Q):
-		turn += key_orbit_speed * delta
-	if Input.is_physical_key_pressed(KEY_E):
-		turn -= key_orbit_speed * delta
+	# Q/E orbiting polls the raw keyboard, which BYPASSES the UI entirely (and dialogs are
+	# separate Window popups, so a viewport focus check doesn't catch them). Callers gate it
+	# with `key_orbit_enabled` instead — the map designer clears it while a dialog is open so
+	# typing 'q'/'e' into a rename / New / save field doesn't also spin the camera.
+	if key_orbit_enabled:
+		if Input.is_physical_key_pressed(KEY_Q):
+			turn += key_orbit_speed * delta
+		if Input.is_physical_key_pressed(KEY_E):
+			turn -= key_orbit_speed * delta
 	# The victory orbit adds a steady spin on top of (or instead of) any key orbit.
 	if _victory_orbit:
 		turn += victory_orbit_speed * delta

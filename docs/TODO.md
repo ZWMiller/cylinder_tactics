@@ -118,11 +118,24 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       **Phase 1 DONE:** `EditableBattlefield extends Battlefield` (additive editing API +
       designer-only grid overlay, `Battlefield.gd` untouched) + `MapDesigner.gd` (Height/
       Surface/Body tools, terrain palette, hover cursor, New/Save/Load to `.tres`, HUD).
-      **TODO next (see `docs/map_builder_implementation_plan.md` §6):** (1) editable map
-      size + name (New is hardcoded 10×10, no rename); (2) a swatch/skill-bar palette across
-      the top; (3) the save/load FileDialog is tiny — set min_size + bigger font. **Then
-      Phase 2:** brush macros (Single/Square/Circle/Line/**Hill**, configurable size N,
-      click-drag height) via `set_tiles`. **Phase 3 (later):** multi-state editing.
+      **§6 fixes:** (1) ✅ editable map size + name — DONE: New/Rename dialogs + a live
+      **RESIZE tool** (Tab cycle; hover an edge, L adds / R deletes, corners do both; green
+      ghost + red overlay preview). (2) ✅ swatch/skill-bar palette across the top — DONE:
+      clickable colored swatches, number-key labels, active-type highlight (click OR number
+      key selects). (3) ✅ FileDialog readability — DONE, and root-caused to a project-wide
+      gap: enabled `canvas_items` stretch (1080p base) so the whole 2D UI scales with the
+      window instead of shrinking on big displays; designer fonts centralized into constants +
+      a shared dialog Theme. (4) ✅ grid outline extended down cliff faces — DONE: vertical posts
+      at every dropped/border edge so steps read fully, not just tile tops. Also: Save dialog
+      now prefills the filename from the map name. **Then Phase 2:** brush macros (Single/Square/
+      Circle/Line/**Hill**, configurable size N, click-drag height) via `set_tiles`. **Phase 3 —
+      Encounter layer:** turn the builder into an *encounter builder* — place enemies (class/
+      weapon/armor/level + per-stat HP/MP/Speed/Move overrides), named characters/bosses, a
+      player **start zone**, and **win-objective tiles** (reach-the-tile victory, not just
+      elimination); save the whole fight and quick-load to test. Visual front-end for the
+      `Encounter` resource; key open question = embed in `MapData` vs a separate `Encounter`
+      that references the map. See `docs/map_builder_implementation_plan.md` §10. **Phase 4
+      (later):** multi-state editing.
 - [x] **Terrain vocabulary + property table + two-layer tiles** — `TileTypes` now holds a
       single-source-of-truth table per type: `color`, `move_cost`, `is_liquid`, `can_cast`,
       `hazard_damage` (reserved, lava placeholder). New types: `DIRT` (default body), `LAVA`,
@@ -258,10 +271,10 @@ The move to **node composition + signals** as the battle architecture landed wit
 ## Polish / nice-to-have
 - [ ] **Battle grid-outline view setting** — a player-toggleable option to show/hide a dark
       outline around every tile edge during battle (off by default). The map builder already
-      draws this (always-on, via `EditableBattlefield._rebuild_grid_overlay`); promote it into
-      the base `Battlefield` as an optional overlay the main game can switch on/off, so the
-      board reads clearly for players who want it. Extend it to every visible edge, not just
-      tile tops (see `docs/map_builder_implementation_plan.md` §6.4).
+      draws this (always-on, via `EditableBattlefield._rebuild_grid_overlay`, now covering tile
+      tops AND cliff-face posts on every dropped/border edge); promote that complete overlay
+      into the base `Battlefield` as an optional layer the main game can switch on/off, so the
+      board reads clearly for players who want it.
 - [ ] **Persist loadouts to disk** — `PartyLoadout` keeps the party's gear in memory only, so it
       resets each launch. Save/load it (`ResourceSaver`/JSON in `user://`) so choices stick between
       sessions. The natural home is the `RunState` work (it would own this) — see the run-loop item.
@@ -270,6 +283,17 @@ The move to **node composition + signals** as the battle architecture landed wit
 - [ ] **Menu polish pass (all scenes)** — more loadout-menu font/proportion/layout fixes (the bump in
       `38539f1` was a first pass), and a general look-and-feel polish across every menu/HUD (loadout +
       battle action/spell/status/shift/end screens) so they read as one consistent, tuned UI.
+- [ ] **★ Global UI theme system** — extract the look-and-feel into one shared place so the whole game
+      inherits it (today every scene sets fonts/colors via scattered per-widget `add_theme_*_override`
+      calls; the map designer's local `_ui_theme` was the first taste). Plan: a **project-default
+      `Theme` `.tres`** assigned via `gui/theme/custom` (fonts + styleboxes — every `Control` inherits
+      automatically), plus a **`UiPalette.gd`** of semantic color constants (ally/enemy/accent/hazard/
+      panel-bg/highlight, the way `TileTypes` centralizes terrain colors). Keep **scale** separate from
+      **look**: the `UiScale` autoload (already wired, `content_scale_factor`, default 1.0) stays the
+      one scale knob — wire a user "UI scale" setting to `UiScale.apply()` later. The real work is the
+      **migration**: remove the inline overrides scene-by-scene so they inherit the theme, with a visual
+      check on each (battle HUD, Loadout, designer) — a cross-cutting refactor, do it as its own focused
+      pass (not speculatively). Folds together with the menu-polish item above. Decided 2026-06-25.
 - [x] **Equipment + multiplicative damage model** — weapons/armor now carry a chunk of the damage
       budget (the fix for "everything does 1 damage"). `offense = round(atk × weapon.power)`,
       `mitigation = round(def × Σarmor × scale)`, two global knobs (`ARMOR_PHYS_SCALE 0.16` /

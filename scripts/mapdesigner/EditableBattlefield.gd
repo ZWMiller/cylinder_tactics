@@ -27,6 +27,38 @@ var _grid_material: StandardMaterial3D
 ## Lift the outline a hair above the cap so it doesn't z-fight with the surface.
 const _GRID_LIFT := 0.02
 
+## Push a cliff-face post a hair OUTWARD from the face (along its outward normal) so it
+## floats just in front of the column instead of z-fighting on its exact corner. This keeps
+## every post visible on faces the camera can see, while a post on a back-side face is still
+## correctly hidden by the geometry in front of it (normal depth testing — no x-ray). Posts
+## only exist where the neighbour is shorter, so "outward" is always open air, never behind
+## another column.
+const _GRID_FACE_OFFSET := 0.02
+
+# --- Resize preview (designer RESIZE tool) ----------------------------------
+
+## The four sides of the grid a RESIZE edit can grow or shrink. A non-corner edge
+## tile touches exactly one side; a corner touches two, and we grow/shrink BOTH at
+## once (so working a corner resizes the whole map quickly). See `sides_at`.
+enum Side { X_MIN, X_MAX, Z_MIN, Z_MAX }
+
+## Translucent GREEN ghost boxes laid one tile BEYOND a hovered edge — a preview of
+## the row/column a left-click would ADD. Each mirrors the height of the edge tile it
+## extends, so the preview reads as the terrain continuing outward. Grown-on-demand
+## pool, leftovers hidden — same trick as the base overlays. Lazily built on first use.
+var _ghost_pool: Array[MeshInstance3D] = []
+var _ghost_mesh: BoxMesh
+var _ghost_material: StandardMaterial3D
+
+## Translucent RED decals laid OVER a hovered edge row/column — a preview of the tiles
+## a right-click would DELETE. Same pooling / lazy build.
+var _delete_pool: Array[MeshInstance3D] = []
+var _delete_mesh: PlaneMesh
+var _delete_material: StandardMaterial3D
+
+## Lift the delete decal a hair above the cap (matches the active-marker lift).
+const _DELETE_LIFT := 0.05
+
 
 ## Render like the base, then (re)draw the tile-edge grid on top. Virtual dispatch means
 ## every base call site (`_ready`, `set_tile`, `load_states`) refreshes the grid for free.
@@ -111,9 +143,27 @@ func _in_bounds(x: int, z: int) -> bool:
 	return x >= 0 and x < grid_width and z >= 0 and z < grid_height
 
 
-## Rebuild the line mesh outlining every tile's top square at its current surface height.
-## Cheap (a few hundred verts even at 24x24), built as a single PRIMITIVE_LINES ArrayMesh
-## so the whole grid is one draw. The overlay node persists across map loads.
+## Accumulate a cliff-face post at world corner (wx, wz) spanning Y [y0, y1], tagged with
+## the face's outward normal `d`. Posts at the SAME corner and height span merge (their
+## normals sum), so a vertical edge shared by two faces is drawn once and the nudge follows
+## the combined normal — a convex corner nudges diagonally, a flush seam straight out. The
+## key quantises corner + span to millimetres so the same physical edge keys identically
+## regardless of which tile contributed it.
+func _add_post(posts: Dictionary, wx: float, wz: float, y0: float, y1: float, d: Vector2i) -> void:
+	var key := "%d:%d:%d:%d" % [roundi(wx * 1000.0), roundi(wz * 1000.0), roundi(y0 * 1000.0), roundi(y1 * 1000.0)]
+	if posts.has(key):
+		var p: Dictionary = posts[key]
+		p["nx"] += d.x
+		p["nz"] += d.y
+	else:
+		posts[key] = {"x": wx, "z": wz, "y0": y0, "y1": y1, "nx": d.x, "nz": d.y}
+
+
+## Rebuild the line mesh outlining the WHOLE grid: every tile's top square, plus a vertical
+## post down each exposed cliff corner (where a tile stands taller than the neighbour it
+## abuts, or sits at the map border). So steps and cliffs read fully, not just the tops.
+## Cheap (a few hundred–thousand verts even at 24x24), built as one PRIMITIVE_LINES
+## ArrayMesh so the whole grid is a single draw. The overlay node persists across loads.
 func _rebuild_grid_overlay() -> void:
 	if _grid_material == null:
 		_grid_material = StandardMaterial3D.new()
@@ -127,10 +177,18 @@ func _rebuild_grid_overlay() -> void:
 
 	var verts := PackedVector3Array()
 	var half := tile_size * 0.5
+	var state := current_state()
+	# Cliff-face posts are accumulated per UNIQUE vertical edge (keyed by corner + height
+	# span) rather than emitted per face. A convex block corner is traced by two faces whose
+	# outward nudges point different ways; emitted separately they'd split into a visible
+	# double line. Merging them and nudging along the SUMMED normal gives a convex corner one
+	# diagonal post, while a flush seam (two coplanar faces) still nudges straight out.
+	var posts := {}
 	for x in grid_width:
 		for z in grid_height:
 			var c := tile_to_world(x, z)   # center of the tile's top surface
-			var y := c.y + _GRID_LIFT
+			var top := c.y                 # world Y of this tile's surface (= height*step)
+			var y := top + _GRID_LIFT
 			var x0 := c.x - half
 			var x1 := c.x + half
 			var z0 := c.z - half
@@ -141,9 +199,266 @@ func _rebuild_grid_overlay() -> void:
 			verts.append_array([Vector3(x1, y, z1), Vector3(x0, y, z1)])
 			verts.append_array([Vector3(x0, y, z1), Vector3(x0, y, z0)])
 
+			# For each side that DROPS to a shorter neighbour (or the border, treated as
+			# ground), record a post at the two corners of that edge spanning the neighbour's
+			# top up to this tile's top, tagged with the face normal so coincident posts merge.
+			for dir in _ORTHO_DIRS:
+				var d: Vector2i = dir   # typed copy — `_ORTHO_DIRS` is untyped (Variant members)
+				var nx: int = x + d.x
+				var nz: int = z + d.y
+				var neighbour_top := 0.0   # off-grid border: face is exposed down to ground
+				if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
+					neighbour_top = state[nx][nz]["height"] * height_step
+				if top - neighbour_top <= 0.001:
+					continue   # flush with (or lower than) the neighbour — no exposed face
+				# True (un-nudged) edge midpoint + its two corners along the edge, where
+				# perp = (dir.y, dir.x) runs perpendicular to dir. The nudge is applied later,
+				# after merging, so it can follow the summed normal.
+				var mx := c.x + d.x * half
+				var mz := c.z + d.y * half
+				var px := d.y * half
+				var pz := d.x * half
+				_add_post(posts, mx + px, mz + pz, neighbour_top, top, d)
+				_add_post(posts, mx - px, mz - pz, neighbour_top, top, d)
+
+	# Emit one line per merged post, nudged outward along the summed face normal so it floats
+	# just in front of the column(s) instead of z-fighting on the exact corner.
+	for p in posts.values():
+		var n := Vector2(p["nx"], p["nz"])
+		if n.length() > 0.0001:
+			n = n.normalized()
+		var ox := n.x * _GRID_FACE_OFFSET
+		var oz := n.y * _GRID_FACE_OFFSET
+		var yb: float = p["y0"] + _GRID_LIFT   # meet the neighbour's top square
+		var yt: float = p["y1"] + _GRID_LIFT
+		verts.append_array([
+			Vector3(p["x"] + ox, yb, p["z"] + oz),
+			Vector3(p["x"] + ox, yt, p["z"] + oz)])
+
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
 	_grid_overlay.mesh = mesh
+
+
+# --- Resize: grow / shrink the grid (designer RESIZE tool) -------------------
+
+## Which grid sides tile (x, z) lies on (see `Side`). An interior tile returns `[]`;
+## a non-corner edge tile returns one side; a corner returns the two it touches. The
+## designer turns this into a grow/shrink that acts on every returned side at once, so
+## hovering a corner extends or trims the map along both axes in one click. Off-grid
+## (or out-of-bounds) tiles return `[]`.
+func sides_at(x: int, z: int) -> Array:
+	var sides: Array = []
+	if not _in_bounds(x, z):
+		return sides
+	if x == 0:
+		sides.append(Side.X_MIN)
+	if x == grid_width - 1:
+		sides.append(Side.X_MAX)
+	if z == 0:
+		sides.append(Side.Z_MIN)
+	if z == grid_height - 1:
+		sides.append(Side.Z_MAX)
+	return sides
+
+
+## Grow the map by one tile on each given side, mirroring the adjacent row/column so
+## the new tiles continue the existing terrain. Rebuilds the grid.
+func grow_sides(sides: Array) -> void:
+	_resize(
+		1 if sides.has(Side.X_MIN) else 0,
+		1 if sides.has(Side.X_MAX) else 0,
+		1 if sides.has(Side.Z_MIN) else 0,
+		1 if sides.has(Side.Z_MAX) else 0)
+
+
+## Shrink the map by removing the edge row/column on each given side. Returns false
+## and changes nothing if that would drop either dimension below 1 tile (so a corner
+## shrink on a 1-wide or 1-tall map is simply refused).
+func shrink_sides(sides: Array) -> bool:
+	return _resize(
+		-1 if sides.has(Side.X_MIN) else 0,
+		-1 if sides.has(Side.X_MAX) else 0,
+		-1 if sides.has(Side.Z_MIN) else 0,
+		-1 if sides.has(Side.Z_MAX) else 0)
+
+
+## Rebuild EVERY state with the given per-side deltas: +1 adds a row/column on that
+## side, -1 removes the edge one, 0 leaves it. Added tiles copy the nearest surviving
+## tile (clamping the index onto the surviving range mirrors the edge into the new
+## row/column — and the corner tile into a corner grow); removed tiles are dropped.
+## Returns false without touching anything if either new dimension would be < 1.
+## Operates on all states so a multi-state map stays one consistent rectangular size.
+func _resize(dx_min: int, dx_max: int, dz_min: int, dz_max: int) -> bool:
+	var new_w := grid_width + dx_min + dx_max
+	var new_h := grid_height + dz_min + dz_max
+	if new_w < 1 or new_h < 1:
+		return false
+	# A positive delta pads (adds) that side; a negative one crops (removes) it.
+	var left_pad := maxi(dx_min, 0)
+	var top_pad := maxi(dz_min, 0)
+	# Surviving old-index range after cropping. Clamping the mapped index onto this
+	# range is what mirrors the nearest edge tile into any padded row/column.
+	var x_lo := maxi(-dx_min, 0)                    # crop from the x==0 side
+	var x_hi := grid_width - 1 - maxi(-dx_max, 0)   # crop from the x==max side
+	var z_lo := maxi(-dz_min, 0)
+	var z_hi := grid_height - 1 - maxi(-dz_max, 0)
+	var new_states: Array = []
+	for state in states:
+		var grid: Array = []
+		for nx in new_w:
+			var ox := clampi(x_lo + (nx - left_pad), x_lo, x_hi)
+			var col: Array = []
+			for nz in new_h:
+				var oz := clampi(z_lo + (nz - top_pad), z_lo, z_hi)
+				col.append((state[ox][oz] as Dictionary).duplicate())
+			grid.append(col)
+		new_states.append(grid)
+	load_states(new_states)
+	return true
+
+
+# --- Resize preview overlays (the hover ghosts the RESIZE tool shows) --------
+
+## Show both resize previews for the hovered `sides`: the GREEN ghost row/column a
+## left-click would ADD (beyond the edge) and the RED overlay a right-click would
+## DELETE (on the edge). Showing both at once is what lets the single RESIZE tool skip
+## a separate add/delete mode — the colors and positions say which click does what.
+func show_resize_preview(sides: Array) -> void:
+	_show_add_ghost(sides)
+	_show_delete_overlay(sides)
+
+
+## Hide both resize previews.
+func clear_resize_preview() -> void:
+	for g in _ghost_pool:
+		g.visible = false
+	for d in _delete_pool:
+		d.visible = false
+
+
+## Lay green ghost boxes one tile beyond each added side (plus the diagonal corner box
+## when two orthogonal sides are added), each scaled to the height of the edge tile it
+## mirrors, so the preview looks like the terrain extended outward.
+func _show_add_ghost(sides: Array) -> void:
+	if _ghost_material == null:
+		_ghost_mesh = BoxMesh.new()
+		_ghost_mesh.size = Vector3.ONE
+		_ghost_material = StandardMaterial3D.new()
+		_ghost_material.albedo_color = Color(0.25, 1.0, 0.35, 0.45)
+		_ghost_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_ghost_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var cells := _ghost_cells(sides)
+	for i in cells.size():
+		var cell: Dictionary = cells[i]
+		var box := _claim_ghost(i)
+		var src_top: float = current_state()[cell["sx"]][cell["sz"]]["height"] * height_step
+		var h: float = maxf(src_top, 0.05)   # keep a flat (height-0) edge previewable
+		box.scale = Vector3(tile_size, h, tile_size)
+		# `_grid_to_world_x/z` apply the centering formula to ANY int, including the
+		# out-of-grid -1 / max indices, so the ghost sits exactly one tile past the edge.
+		box.position = Vector3(_grid_to_world_x(cell["gx"]), h * 0.5, _grid_to_world_z(cell["gz"]))
+		box.visible = true
+	for i in range(cells.size(), _ghost_pool.size()):
+		_ghost_pool[i].visible = false
+
+
+## Lay red translucent decals over the edge row/column on each hovered side — the tiles
+## a right-click would remove.
+func _show_delete_overlay(sides: Array) -> void:
+	if _delete_material == null:
+		_delete_mesh = PlaneMesh.new()
+		_delete_mesh.size = Vector2(tile_size * 0.96, tile_size * 0.96)
+		_delete_material = StandardMaterial3D.new()
+		_delete_material.albedo_color = Color(1.0, 0.25, 0.25, 0.5)
+		_delete_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_delete_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var cells := _delete_cells(sides)
+	for i in cells.size():
+		var t: Vector2i = cells[i]
+		var d := _claim_delete(i)
+		d.position = tile_to_world(t.x, t.y) + Vector3(0.0, _DELETE_LIFT, 0.0)
+		d.visible = true
+	for i in range(cells.size(), _delete_pool.size()):
+		_delete_pool[i].visible = false
+
+
+## The ghost cells for the added `sides`. Each entry is `{gx, gz, sx, sz}`: the ghost's
+## (out-of-grid) position and the surviving tile (`sx, sz`) whose height it mirrors.
+## Pairs of orthogonal sides also emit the diagonal corner cell, so a corner grow
+## previews its whole L of new tiles, not just the two straight runs.
+func _ghost_cells(sides: Array) -> Array:
+	var cells: Array = []
+	var w := grid_width
+	var h := grid_height
+	var west := sides.has(Side.X_MIN)
+	var east := sides.has(Side.X_MAX)
+	var north := sides.has(Side.Z_MIN)
+	var south := sides.has(Side.Z_MAX)
+	if west:
+		for z in h:
+			cells.append({"gx": -1, "gz": z, "sx": 0, "sz": z})
+	if east:
+		for z in h:
+			cells.append({"gx": w, "gz": z, "sx": w - 1, "sz": z})
+	if north:
+		for x in w:
+			cells.append({"gx": x, "gz": -1, "sx": x, "sz": 0})
+	if south:
+		for x in w:
+			cells.append({"gx": x, "gz": h, "sx": x, "sz": h - 1})
+	if west and north:
+		cells.append({"gx": -1, "gz": -1, "sx": 0, "sz": 0})
+	if west and south:
+		cells.append({"gx": -1, "gz": h, "sx": 0, "sz": h - 1})
+	if east and north:
+		cells.append({"gx": w, "gz": -1, "sx": w - 1, "sz": 0})
+	if east and south:
+		cells.append({"gx": w, "gz": h, "sx": w - 1, "sz": h - 1})
+	return cells
+
+
+## The edge tiles a delete on the given `sides` would remove. A corner tile can appear
+## for two sides; drawing the red decal over it twice is harmless.
+func _delete_cells(sides: Array) -> Array:
+	var cells: Array = []
+	if sides.has(Side.X_MIN):
+		for z in grid_height:
+			cells.append(Vector2i(0, z))
+	if sides.has(Side.X_MAX):
+		for z in grid_height:
+			cells.append(Vector2i(grid_width - 1, z))
+	if sides.has(Side.Z_MIN):
+		for x in grid_width:
+			cells.append(Vector2i(x, 0))
+	if sides.has(Side.Z_MAX):
+		for x in grid_width:
+			cells.append(Vector2i(x, grid_height - 1))
+	return cells
+
+
+## Grow the ghost-box pool until it has a box at `i`, then return it.
+func _claim_ghost(i: int) -> MeshInstance3D:
+	while i >= _ghost_pool.size():
+		var m := MeshInstance3D.new()
+		m.mesh = _ghost_mesh
+		m.material_override = _ghost_material
+		m.visible = false
+		add_child(m)
+		_ghost_pool.append(m)
+	return _ghost_pool[i]
+
+
+## Grow the delete-decal pool until it has a decal at `i`, then return it.
+func _claim_delete(i: int) -> MeshInstance3D:
+	while i >= _delete_pool.size():
+		var m := MeshInstance3D.new()
+		m.mesh = _delete_mesh
+		m.material_override = _delete_material
+		m.visible = false
+		add_child(m)
+		_delete_pool.append(m)
+	return _delete_pool[i]

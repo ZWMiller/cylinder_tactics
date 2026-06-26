@@ -31,8 +31,11 @@ designer is "draw → save", and authoring maps is visual.
 
 1. ✅ **Map format + load/save + variable size** — DONE (commit `2b53438`).
 2. ✅ **Terrain property table + two-layer tiles** — DONE (commit `aca6e55`).
-3. 🔄 **Map designer** — Phase 1 DONE (this session, see §5). Phase 2 (brushes) + Phase 3
-   (multi-state) pending. **Plus the 3 fixes in §6 — start here tomorrow.**
+3. 🔄 **Map designer** — Phase 1 DONE (see §5). §6 fixes #1–#4 all DONE (editable size+name,
+   swatch bar, FileDialog size + project-wide UI scale, full cliff-face grid outline). Next:
+   **Phase 2 (brushes, §9)**, then **Phase 3 (Encounter layer — place enemies / start zone /
+   win tiles, §10)** which turns the map designer into an *encounter builder*, then **Phase 4
+   (multi-state, §11)**.
 4. ⬜ **Wire terrain gameplay** — move cost / casting / hazard / liquid depth (see §7).
 5. ⬜ **Line-of-sight + projectile collision** (see §8).
 6. ⬜ **Author new demo maps** in the designer; retire the procedural 24×24 cycle.
@@ -136,34 +139,68 @@ See §5 for the full description.
 
 ## 6. ⭐ START HERE TOMORROW — the requested fixes
 
-1. **Can't change map size or name in the builder.**
-   - New map is hardcoded `NEW_MAP_WIDTH/HEIGHT = 10`; there's no name editing and no resize.
-   - Need: a **New-map dialog** (enter width, height — and probably name) before generating,
-     and a way to **rename** the current map (its `map_name` goes into the `.tres`). Possibly
-     also resize an existing map (pad/crop). At minimum: width/height/name inputs on New.
-   - Likely a small `Control` popup (`AcceptDialog` with `SpinBox`es + a `LineEdit`), or
-     inline HUD fields. Keep it simple.
+1. ✅ **Editable map size + name** — DONE.
+   - **New-map dialog** (`N`): an `AcceptDialog` with a name `LineEdit` + width/length
+     `SpinBox`es (1–64), prefilled with the current map's name/size. Confirming builds a
+     fresh flat grid. **Rename dialog** (`R`): name-only `AcceptDialog` that rewrites
+     `_map_name` (written into the `.tres` on save) without touching tiles.
+   - **Live resize via a new `RESIZE` tool** (joins the Tab cycle HEIGHT/SURFACE/BODY/RESIZE).
+     Hover an edge tile: **L-click adds**, **R-click deletes** that row/column. **Corners do
+     BOTH touching sides at once** (grow/shrink the whole map fast). WYSIWYG hover preview:
+     a translucent **green ghost** row/column appears just beyond the edge (mirrors the edge
+     tile's height so terrain continues) = what L adds; a translucent **red overlay** on the
+     edge row = what R deletes. Both shown together, so the one tool needs no separate
+     add/delete mode. A shrink that would drop a dimension below 1 is refused.
+   - Implementation: `EditableBattlefield` gained `sides_at` / `grow_sides` / `shrink_sides`
+     (→ the `_resize(dx_min,dx_max,dz_min,dz_max)` core: rebuilds **every** state, added
+     tiles clamp-copy the nearest surviving tile to mirror the edge/corner, dropped tiles
+     cropped) + `show_resize_preview` / `clear_resize_preview` (lazily-built, pooled green
+     ghost boxes + red decals, same grown-on-demand/hide-leftovers pattern as the base
+     overlays). `MapDesigner` added the `RESIZE` tool branch, `_apply_resize`, the two
+     dialogs, and a `_dialog_open()` guard that suspends hover/hotkeys while a dialog is up.
+   - **Verify in the designer (F6):** New at a custom size/name; rename; RESIZE tool grow/
+     shrink each edge and a corner; confirm the green ghost mirrors terrain and the red
+     overlay marks the doomed row; save → reload and check the size/name round-trip.
 
-2. **Swatch/palette bar (ARPG skill-bar style).**
-   - A horizontal bar across the top showing each terrain type as a **colored swatch** with
-     its **number-key label**, highlighting the currently-active type. Colors come from
-     `TileTypes.surface_color(type)`. Should track `[`/`]`/number-key selection. Purely a HUD
-     addition in `MapDesigner._build_hud` (+ a refresh on type change). 11 types; number keys
-     cover 10, so show the binding (or `[ ]` hint) for QUICKSAND.
+2. ✅ **Swatch/palette bar (ARPG skill-bar style)** — DONE.
+   - A horizontal bar across the top (`MapDesigner._build_swatch_bar`): one clickable colored
+     `Panel` per PALETTE type (color = `TileTypes.surface_color`), captioned with its
+     number-key label ("1"–"9", "0", and "[ ]" for QUICKSAND, which has no digit). **Selectable
+     two ways — click the swatch OR press its number key** (both route through `_select_type`).
+     The active type gets a bright thick border; `_refresh_swatches` recolors each swatch's own
+     StyleBoxFlat. The bar spans the top but has `MOUSE_FILTER_IGNORE` so only the swatches
+     catch clicks (painting near the top still works); each swatch is `STOP` so its click
+     doesn't leak to the paint handler. Hovering a swatch shows the type name as a tooltip.
 
-3. **Save/Load FileDialog is tiny — unreadable.**
-   - Currently `popup_centered_ratio(0.6)`; it renders very small. Fix by setting an explicit
-     `min_size` (e.g. `Vector2i(900, 600)`) and/or `popup_centered(Vector2i(900,600))`, and
-     bump the dialog's font size (theme override) so filenames are legible on hi-res.
+3. ✅ **Save/Load FileDialog readability + a project-wide UI scale fix** — DONE.
+   - Root cause was bigger than the dialog: the project had **no stretch mode**, so the whole
+     2D UI rendered at fixed native pixels and shrank on displays larger than the 1920×1080
+     base. Fixed globally in `project.godot`: `display/window/stretch/mode="canvas_items"` +
+     `aspect="expand"`. Now the UI scales with the window from the 1080p base (3D stays native;
+     mouse-picking unaffected — everything stays in base-space coords). **This also scales the
+     battle/Loadout HUDs — eyeball them (F5).**
+   - Designer fonts **centralized** into `FONT_HUD` / `FONT_SWATCH` / `FONT_DIALOG` constants
+     (tune in one place) and bumped. The four dialogs share one `Theme` whose `default_font_size`
+     enlarges ALL their text at once — including the FileDialog file list / buttons we can't
+     reach per-control. FileDialogs got `min_size = 900×620` and `popup_centered(1000×680)`
+     instead of the tiny `popup_centered_ratio(0.6)`.
 
-4. **Grid outline: extend to EVERY visible tile edge (stays always-on in the builder).**
-   - In the map builder the dark grid is always on — keep it that way; just make it complete.
-     Currently `_rebuild_grid_overlay` (in `EditableBattlefield`) only draws the 4 top edges.
-     Add the **vertical edges** down each exposed cliff face (where a tile is taller than the
-     neighbor it abuts, or at the grid border) so steps/cliffs are fully outlined. Reuse the
-     same `PRIMITIVE_LINES` ArrayMesh; for each tile compare its height to each orthogonal
-     neighbor and drop a vertical line at the shared corners where there's a drop (similar in
-     spirit to the move-range outline's corner-post logic in `Battlefield.show_move_range`).
+4. ✅ **Grid outline extended to EVERY visible edge (always-on in the builder)** — DONE.
+   - `_rebuild_grid_overlay` now, in addition to the 4 top-square edges, drops a **vertical
+     post at the two corners of each side that DROPS** — i.e. where the tile is taller than its
+     orthogonal neighbour (`top - neighbour_top > 0`), or at the grid border (neighbour treated
+     as ground, so the outer walls outline down to y≈0). Each post runs from the neighbour's
+     top up to this tile's top; combined with the neighbour's own top square (its bottom edge)
+     this fully boxes in the cliff face. Only the *taller* side draws (the shorter neighbour
+     skips it). Posts are accumulated per UNIQUE vertical edge (`_add_post`, keyed by corner +
+     height span quantised to mm) and merged across faces, then each is nudged a hair OUTWARD
+     along the SUMMED face normal (`_GRID_FACE_OFFSET`) so it floats just in front of the
+     column instead of z-fighting on the exact corner. Two subtleties this handles: a flush
+     seam (two coplanar faces) merges to one straight-out nudge so the seam line is visible
+     (was z-fighting away); a convex block corner (two perpendicular faces) merges to ONE
+     diagonal post instead of splitting into a double line. Depth testing stays ON, so
+     back-side posts are still correctly occluded (x-ray was tried and rejected — it revealed
+     lines behind hills). Still one `PRIMITIVE_LINES` ArrayMesh.
    - SEPARATE (main game, not the builder): a player **view setting to toggle the grid on/off
      in battle** — see TODO.md. Different feature; don't conflate with the builder's.
 
@@ -219,7 +256,61 @@ After the §6 fixes, build the brush macros. Owner wants:
 
 ---
 
-## 10. Phase 3 designer — multi-state editing (later)
+## 10. Phase 3 designer — the Encounter layer (turn the map builder into an Encounter Builder)
+
+**Owner's ask (2026-06-25):** the saved map should carry not just the *terrain* but the
+*fight* — author the whole encounter visually in the designer, save it, then quick-load it
+into the existing battle engine to playtest. This is expected to make designing fights *much*
+faster ("place things how I want, save, go test"). It also becomes the visual front-end for
+the planned `Encounter` resource (see `TODO.md` "toward a reusable `Battle.tscn`").
+
+**What you place (new editing "layers" on top of terrain painting):**
+1. **Enemy units** — drop an enemy on a tile, then edit its spec: **class / weapon type**,
+   **armor type**, **level**, and **per-stat overrides** (specific HP / MP / Speed / Move, and
+   likely others — absolute or delta on top of the rolled/class block). Allegiance = enemy.
+2. **Named characters / bosses** — place a *specific authored* character instead of a rolled
+   enemy (e.g. a boss). Boss *creation* is a later system; for now a placement references a
+   named id / `Recruit`. Ties to the existing `Recruit` / `ClassDef` / `StatRoll` data and the
+   planned `Boss extends Unit`.
+3. **Player start zone** — paint a set of tiles marking where the player may deploy. Later the
+   pre-battle flow lets the player choose each character's start tile *within* this zone.
+4. **Battle-end / objective tiles** — paint tiles that end the battle as a **win if any player
+   unit reaches one** (reach-the-goal objective, so the win condition isn't always "defeat
+   everyone"). Keep it extensible — later: escort / survive-N-turns / etc.
+
+**⭐ The key decision to settle when we start (data model):** today `MapData` = pure terrain
+(states). The encounter adds placements. Options:
+- **(A)** extend `MapData` to also hold the encounter (enemy placements, start zone, end tiles)
+  — matches the owner's "the map state contains the encounter build" framing; one file.
+- **(B)** a separate **`Encounter` resource** (already in the architecture plan) that
+  *references* a `MapData` + holds the placements — keeps maps reusable across fights and lines
+  up with the reusable-`Battle.tscn` direction (`Encounter` → `EncounterSpawner` → battle).
+- **Likely resolution:** keep `MapData` terrain-only and introduce `Encounter` (references a
+  map + placements); the builder edits/saves an `Encounter`, and `Main`/`Battle.tscn` consume
+  the *same authored file* we test. Decide for real at Phase 3 kickoff. Placement shapes,
+  roughly: enemy `{tile, class, weapon, armor, level, overrides:{hp?,mp?,spd?,move?}, name?}`;
+  start zone = `Array[Vector2i]`; end tiles = `Array[Vector2i]` (+ a future condition type).
+
+**Builder UX (sketch — design pass at kickoff, like we did for RESIZE):** a **layer/mode
+switch** (Terrain vs Encounter) that re-skins the top palette; in Encounter mode, click a tile
+to place/select a unit and open a small **inspector panel** (reuse the dialog + shared-`Theme`
+pattern) for its spec; start-zone and end-tiles are tile-set paints drawn as translucent
+colored overlays (reuse the marker-pool overlay trick). Unit markers could reuse the real
+`Unit` cylinder+hat for WYSIWYG, or a lightweight token to start.
+
+**Payoff / integration:** a **quick-test** path — save the encounter, then a thin launcher
+loads it into the existing `Main`/`Battle` flow (player roster from `PartyLoadout`, enemies +
+objectives from the encounter). Surfaces the **win-condition system**: today
+`Main._check_battle_end` is elimination-only and will need to learn objective tiles. This phase
+is effectively the authoring tool for the `Encounter` / `EncounterSpawner` / "`Battle.tscn`
+returns a result" architecture items — build it with those in mind.
+
+**Sequencing:** depends on the `Encounter` resource (architecture section), so expect to land a
+first cut of that here. Independent of multi-state editing (Phase 4) — either order is fine.
+
+---
+
+## 11. Phase 4 designer — multi-state editing (later)
 
 The shift-sequence (a map is an ordered list of states; the time-degradation gimmick cycles
 them). Designer needs: switch between states, add / duplicate-current / delete a state. The
@@ -229,7 +320,7 @@ needs this.
 
 ---
 
-## 11. How to run & verify (important gotchas)
+## 12. How to run & verify (important gotchas)
 
 - **Run the designer:** open `scenes/MapDesigner.tscn` in the editor, then **F6** (or
   right-click the scene in FileSystem → **Run Scene**). **F5** runs the project main scene
@@ -251,7 +342,7 @@ needs this.
 
 ---
 
-## 12. File map (quick reference)
+## 13. File map (quick reference)
 
 | File | Role |
 |------|------|

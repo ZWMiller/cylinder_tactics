@@ -18,12 +18,19 @@ config/icon="res://icon.svg"
 [autoload]
 
 PartyLoadout="*res://scripts/PartyLoadout.gd"
+UiScale="*res://scripts/UiScale.gd"
 
 [display]
 
 window/size/viewport_width=1920
 window/size/viewport_height=1080
 window/size/mode=2
+; Scale the 2D UI to the window relative to the 1920x1080 base above, so fonts/HUD stay
+; proportional on any resolution instead of shrinking on large/high-DPI displays. 3D is
+; unaffected (still rendered at native res), and game logic keeps working in base-space
+; coordinates. "expand" reveals more area on off-aspect windows rather than letterboxing.
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [physics]
 
