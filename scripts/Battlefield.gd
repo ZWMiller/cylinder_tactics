@@ -683,7 +683,25 @@ func clear_active_tile() -> void:
 ## `project_ray_origin` (where the ray starts) and `project_ray_normal` (its
 ## direction). We then ask the physics world for the first body that ray hits and
 ## read the grid coordinate we stamped onto it in `_build_tiles`.
+##
+## This is a thin wrapper over `tile_and_face_at_screen_point` (one ray path); it
+## drops the face for the many callers that only care which tile was hit.
 func tile_at_screen_point(camera: Camera3D, screen_point: Vector2) -> Vector2i:
+	return tile_and_face_at_screen_point(camera, screen_point)["tile"]
+
+
+## Ray-pick the tile AND the face under a screen point.
+##
+## Returns a dictionary `{ "tile": Vector2i, "face": TileFaces.Face }`. On a miss,
+## `tile` is `INVALID_TILE` (and `face` is `TOP`, an unused placeholder) — so a
+## caller can keep its existing `tile == INVALID_TILE` check and simply ignore the
+## face. This is Layer A of the face work (docs/GAME_DESIGN.md §11): nothing acts on
+## the face yet, but picking now reports it so later face-walking has it for free.
+##
+## The face comes straight from the physics hit `normal` (see `TileFaces.from_normal`),
+## so a single collision box per tile is enough — we deliberately did NOT add a
+## collider per face (see the 2026-06-27 collision finding in the decision log).
+func tile_and_face_at_screen_point(camera: Camera3D, screen_point: Vector2) -> Dictionary:
 	var from: Vector3 = camera.project_ray_origin(screen_point)
 	var to: Vector3 = from + camera.project_ray_normal(screen_point) * _PICK_RAY_LENGTH
 
@@ -693,13 +711,17 @@ func tile_at_screen_point(camera: Camera3D, screen_point: Vector2) -> Vector2i:
 	var query := PhysicsRayQueryParameters3D.create(from, to)
 	var hit := space.intersect_ray(query)
 
-	# `intersect_ray` returns {} on a miss, or a dict with "collider" on a hit.
+	# `intersect_ray` returns {} on a miss, or a dict with "collider" + "normal"
+	# (the world-space surface normal at the hit point) on a hit.
 	if hit.is_empty():
-		return INVALID_TILE
+		return {"tile": INVALID_TILE, "face": TileFaces.Face.TOP}
 	var collider: Object = hit["collider"]
 	if collider != null and collider.has_meta("grid_coord"):
-		return collider.get_meta("grid_coord")
-	return INVALID_TILE
+		# Which face was struck falls straight out of the hit normal — no extra
+		# colliders needed, because the box's six faces have distinct normals.
+		var face: TileFaces.Face = TileFaces.from_normal(hit["normal"])
+		return {"tile": collider.get_meta("grid_coord"), "face": face}
+	return {"tile": INVALID_TILE, "face": TileFaces.Face.TOP}
 
 
 # --- Internal helpers --------------------------------------------------------

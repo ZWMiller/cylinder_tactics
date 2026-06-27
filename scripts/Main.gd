@@ -37,6 +37,17 @@ const _ACTION_SPELL := "Spell"
 const _ACTION_STATS := "Stats"
 const _ACTION_END := "End Turn"
 
+## Debug toggle for the Layer A face work (docs/GAME_DESIGN.md §11): when true, the
+## hover path prints the tile + face under the mouse each frame, so we can eyeball
+## that the picker reports side / underside faces cleanly on tall, occluded geometry.
+## Off by default — it is a verification aid, not gameplay.
+##
+## `@export` (rather than `const`) surfaces this in the editor Inspector as a checkbox
+## on the Main node, and on the Remote scene tree it can be ticked while the game runs —
+## so it can be toggled without editing code. The underscore prefix is dropped because
+## an exported, Inspector-facing property is part of the node's public surface.
+@export var debug_pick_face: bool = false
+
 ## How long (seconds) the cursor must rest on a unit before its stat panel pops up.
 const HOVER_DELAY := 1.0
 
@@ -280,7 +291,13 @@ func _process(delta: float) -> void:
 	# Hovering a unit = hovering the tile it stands on. Units have no collision of
 	# their own, but their tile does, so we ray-pick the tile and look up its occupant
 	# — reusing the Battlefield as the single coordinate/picking authority.
-	var tile := _battlefield.tile_at_screen_point(_camera, get_viewport().get_mouse_position())
+	var pick := _battlefield.tile_and_face_at_screen_point(_camera, get_viewport().get_mouse_position())
+	var tile: Vector2i = pick["tile"]
+	# Layer A face verification (docs/GAME_DESIGN.md §11): with the flag on, eyeball
+	# that hovering a tall cliff's exposed brown side reports a side face, and the
+	# underside (rotate the camera below the map) reports BOTTOM. Off by default.
+	if debug_pick_face and tile != Battlefield.INVALID_TILE:
+		print("pick tile=%s face=%s" % [tile, TileFaces.display_name(pick["face"])])
 	var unit: Unit = _units_by_tile.get(tile)
 
 	if unit != _hover_unit:

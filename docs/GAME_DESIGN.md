@@ -404,3 +404,170 @@ Build the reveal as a reusable "(re)draw these tiles" routine, not a one-off int
 - Whether the shift truly reuses the draw-in effect, or just shares its visual vocabulary.
 - Treatment of UI/HUD and the existing overlays (move-range outline, damage numbers,
   win/lose screen) in the painted style so they don't read as a different medium.
+- **(See §11.)** Whether the watercolor look is the *genuine* target aesthetic, or a
+  god-introduced **intrusion** weaponized to unsettle the player — §11 reframes §10.
+
+---
+
+## 11. The meta-god reveal — the antagonist who breaks the game (Later)
+
+**Status: Later / one decision locked, the rest Open.** A second signature idea alongside the
+time shift: the game is secretly **meta**. The "kill god" premise these tactics games always
+carry becomes literal antagonism — partway through, the **god starts cheating**, breaking the
+spatial, UI, and even *graphical* rules of the game, and mocks the **player** (not the player's
+characters) in a fourth-wall, *Stanley Parable*-style voice: "Oh, you thought a god rolls over
+and dies because your pixel swords beat my pixel swords?" Captured now so the systems it rides
+on — the shift (§4), the time-mage (§5), the art language (§10) — are built to *allow* it, not
+retrofitted. **Do not design in earnest until a single battle is fun and the shift ships.**
+
+### Locked decision: **decay first, god revealed later**
+
+The early game presents the §4 map shift as impersonal "**the world is decaying**." The mid-game
+**rug-pull** is that the decay was the **god** all along. The reveal *is* the unification of the
+two signature systems — so the shift must be authored to be **re-skinned mid-campaign** from a
+neutral mechanic into the god's hand. (Decided 2026-06-27; see `docs/DECISION_LOG.md`.)
+
+### The aesthetic conceit — "the real game, built around a PS1 game"
+
+The base game wears a deliberately **low-fi, blocky** skin (the current geometry-and-flat-color
+prototype is literally this — placeholder art *is* the early aesthetic). The god's intrusions
+**violate that established style on purpose**: things appear that **don't belong** to the game's
+graphical vocabulary — a sudden **watercolor** flourish, a jarringly **"realistic" 3D asset** —
+specifically to make the player feel *wrong-footed* ("how is that even in this game?"). The
+wrongness is the point: a low-fi world being overwritten by a higher power who doesn't respect
+its rules, visual or mechanical.
+
+**This recontextualizes §10.** The watercolor "the map draws itself" sequence may not be a
+neutral *target look* — it could be a **god move**, introduced *at* the player to make them feel
+dumb ("you thought your blocky little world was all there was?"). **Open question:** is watercolor
+(a) the genuine end-state aesthetic, (b) a weaponized intrusion, or (c) **both** — it begins as an
+unsettling intrusion and is later *earned* as the real look. Lean (c); decide at reveal design.
+
+### Three structural constraints to respect NOW (so the reveal is a re-skin, not a rebuild)
+
+1. **Shift *presentation* is a swappable skin over shift *mechanics*.** `advance_shift`, the
+   telegraph, the cinematic, and `ShiftCounter` stay agnostic about *why* the map changes. Early:
+   neutral "decay" copy. Post-reveal: the **same** events get a face, a voice, and mocking text.
+   Keep cinematic text / HUD copy / (future) VO hooks as data, not hardcoded strings.
+2. **The previewed future is a *queryable state that something could later tamper with*.** §4
+   already requires the next state to exist before it's applied. Don't assume the preview is
+   *incorruptible*: the first time the god **lies in the preview** can *be* the reveal — the moment
+   a trustworthy mechanic does something an impersonal mechanic can't. Build the tampering later;
+   just don't bake in "preview always tells the truth."
+3. **Grid↔world placement stays the single chokepoint, and "height" generalizes to a *face
+   normal*.** All world placement already flows through `Battlefield`'s grid↔world helpers, and
+   picking is a raycast against real geometry (§DECISION_LOG 2026-06-19). Generalizing the buried
+   assumption "height is +Y" into "height is along a **face normal** (origin + basis)" is the lever
+   that turns *walking on the walls / underside* from a coordinate-core rewrite into content: a
+   "face" of the map becomes just another coordinate frame; unit cylinders go horizontal because
+   their up-axis follows the face normal; the raycast picker already works at any orientation.
+
+### Near-term build intent — "walk to the bottom of the map" (a feel test)
+
+Wanted **soon**, ahead of the full reveal, just to *feel* it. Two pieces:
+- **Generalize grid↔world to a face normal** (constraint 3) so a unit can stand on / walk across a
+  non-top face (side, underside) with gravity re-pointed along that face. Reachability/jump-gating
+  (`reachable_tiles`, `classify_path`, the BFS) currently assume one 2D grid with height on one
+  axis — they need to operate per-face.
+- **Tile blocks gain a bottom cap.** Today a tile is two-layer: a surface/cap `type` + a side
+  `body` type (a full vertical stack was rejected as overkill — §DECISION_LOG 2026-06-24). The
+  **underside** needs its own renderable cap so it can be made to look **intentionally
+  "wrong/unfinished"** — raw, ugly, un-textured graph-paper backside (which dovetails with §10:
+  the underside is the storybook load sequence *frozen un-painted*). Extend the two-layer model to
+  three faces (top cap / sides / **bottom cap**), don't special-case it.
+
+### The god's cheats — bucketed by build cost
+
+**Nearly free (reuse shipped systems):** warp terrain mid-fight (= the shift); **grey out / disable
+menu actions** (reuse `_is_action_enabled` + the disabled render path); **fast-forward the shift
+clock** to punish a preview (mutate `map_transition_countdown`); **hide or lie in** the stat
+panels (they're dumb views — feed them garbage). **Medium:** punch a hole / lava-pentagram that
+**summons enemies mid-battle** (a shift state + hazard tile + registering a unit with
+`TurnManager` mid-fight); **revive a "dead" enemy** ("I never said it stayed dead" — needs a corpse
+registry instead of freeing the node); a **vertical duplicate map** whose archers shoot across
+(rendering is trivial in 3D; the work is cross-grid targeting/LOS). **Expensive (the showpiece):**
+**walk on the sides / underside** (the face-normal generalization above); a **sphere of tiles**
+(curved adjacency — a *separate*, much-later stunt, not part of the face generalization).
+
+### Meta-puzzles layered on the battle puzzle
+
+The god's constraints should be **solvable by the player in-world**, not just suffered — a meta-puzzle
+*on top of* the tactics puzzle. The motivating example: a **"realistic" vine grows out of the board
+and wraps the action menu**, disabling that action. The solution isn't a battle move — if the player
+**rotates the camera**, the vine visibly **strains**; *wiggling* the camera back and forth **snaps**
+it and frees the action. **The pattern:** the god imposes an intrusive, off-style asset as a
+constraint; the player breaks it via an *unexpected* use of an *existing* control (here, the
+`CameraController` the player already owns). Reuses systems already built; the discovery is the fun.
+
+### Player counter-powers = the time-mage (§5), escalating
+
+The player isn't only a victim. The §5 time-mage powers — bending the shift, breaking the map's
+rules — are **the player's answer to the god breaking those same rules**. "Walking on the walls" is
+the player *learning to cheat back*. The meta-escalation and the deferred time-mage kit are the
+**same feature** seen from two sides; build §5 with the god in mind. (Some rule-breaks may be
+*always available* to the player — they simply never think to try until the god demonstrates them.)
+
+### The reveal structure (campaign shape, ties to §9)
+
+A candidate arc: the player **hunts a mocking mini-boss across 3–4 "normal" maps**, during which
+the cheats are **seeded subtly as "decay glitches"** (a tile that shifts one beat too conveniently
+for the enemy; a menu option that flickers). The payoff is a mini-boss **arena that spawns
+"empty,"** the boss taunting from nowhere — the player must discover they can **walk around the
+side to reveal the unfinished underside** (lava pentagram, summoned enemies, the boss portalling
+*through* the board to strike from the top). **Craft risk:** an empty arena reads as a *bug*, not a
+puzzle — the god **mocking the player for not looking everywhere** must double as the hint.
+
+### Resolved: the weird mechanics are PERMANENT core, not set-pieces (decided 2026-06-27)
+
+The god's rule-breaks **do not revert** after the reveal. Walking on faces, the broken/altered
+menus, mid-fight summons, etc. become a **permanent part of the battle problem-solving space**,
+**authored in the map/encounter builder** like any other mechanic — the game must **stand alone
+past the reveal**, so "the god did a weird thing in one fight" is not enough; the weird thing
+becomes a tool both sides reason about in ordinary battles. This makes **faces (and friends) core
+infrastructure the builder sits on**, not a deferred party trick. (Resolves the prior open question
+on permanence; ties to the §5 time-mage kit, which is the player's version of the same powers.)
+
+### Build sequencing: split "the face work" into Layer A (model) and Layer B (gameplay)
+
+Because faces are core *and* builder-authored, "the face work" is **two layers with different risk
+and timing**. The dividing line: **anything that, baked wrong, forces a builder rewrite is Layer A
+and is decided/baked NOW; the deep math is Layer B and is deferred**, built on top of A and
+validated with the finished builder (one-click test fights). Build the builder **once**, face-ready.
+
+**Layer A — face *model* (data / addressing / collision): bake into the current builder pass.**
+- A **`Face` enum** (`TOP, NORTH, SOUTH, EAST, WEST, BOTTOM`); a tile *address* becomes
+  `(Vector2i tile, Face face)`, **defaulting `TOP`** everywhere today (the reserve-a-slot-default-it
+  pattern used for `evasion`/`temporal_resist` and the shift's reserved behaviors).
+- **Unit placements and authored mechanics carry a `face`**, defaulted `TOP`. The current builder UI
+  only ever sets `TOP`; face-authoring tools are **additive** later, not a rewrite, *because the data
+  already holds a face*.
+- **Bottom caps** — extend the two-layer tile (top cap / side `body`, §DECISION_LOG 2026-06-24) to
+  **three faces (top cap / side / bottom cap)** so the underside can be made intentionally
+  "wrong/unfinished". Pure rendering/data, no gravity — fold in now while touching the tile model.
+- **Picking returns `(tile, face)`** — wire now even though only `TOP` is acted on (see collision note).
+
+**Layer B — face *gameplay*: deferred focused effort.** Gravity re-point along a face normal,
+per-face reachability/jump-gating (the BFS currently assumes one 2D grid with height on one axis),
+unit orientation on a face, and face-to-face traversal (how a unit crosses the rim — *step over a
+walkable lip* vs. *god teleports you onto a face* — decide at Layer B kickoff). Layer B **reads** the
+face data Layer A produces.
+
+**Collision finding (probably saves work):** we likely do **not** need physically separate colliders
+per face. (1) Godot's raycast already returns the **hit `normal`**, so the existing *single box per
+tile* can yield *which face* was clicked (map world-normal → `Face`) — face identity for picking and
+authoring is free from the picker we already have. (2) Units have **no collision** and movement is a
+**scripted point-queue walk** (§DECISION_LOG 2026-06-19), so "walking along a side" is a
+coordinate/gravity problem (Layer B), **not** a collider problem. **Verify** the one risk before
+assuming the heavier model: that exposed side/bottom faces get hit cleanly by the ray on tall/occluded
+geometry. Lean: per-face *identity* + *addressing/placement data*, not per-face *physics shapes*.
+
+### Open questions (defer)
+
+- Watercolor: genuine target look, weaponized intrusion, or both-then-earned (lean both — see above).
+- How heavy-handed the fourth-wall voice gets, and how far the "metagame" hooks reach (commenting on
+  reloads / alt-tabbing is on-theme; pulling the real OS username is likely a step too far).
+- Whether seeded "decay glitches" are authored per encounter (§DECISION_LOG encounter builder) or a
+  generic "glitch" layer the shift can roll.
+- **Layer B traversal model:** walkable-rim (gravity rotates as you cross an edge) vs. god/ability
+  teleport onto a face — drives whether reachability spans faces in one BFS or treats each face as its
+  own grid. Decide at Layer B kickoff.

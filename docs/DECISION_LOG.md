@@ -6,6 +6,111 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-27 — Meta-god reveal: decay first, god revealed later (direction; build deferred)
+
+**Decision (direction + one lock):** Adopt a second signature idea — the game is secretly **meta**:
+a "kill god" premise where the god starts **cheating** (breaking spatial/UI/graphical rules) and
+mocks the **player** fourth-wall *Stanley Parable*-style. Full vision in `docs/GAME_DESIGN.md` §11.
+**Locked:** the §4 map shift is presented early as impersonal "**the world is decaying**"; the
+mid-game **rug-pull** reveals the decay was the **god** all along. So the reveal is a *re-skin* of
+the shift, not a new system.
+
+**Why this framing:** it **unifies the two signature systems** instead of competing with them. The
+shift (§4) becomes the god's hand; the player's time-mage powers (§5) become the **player's answer**
+to the god breaking the rules (walking on walls = the player learning to cheat back). The watercolor
+art (§10) may be recontextualized as a god-introduced **intrusion** — the base game wears a low-fi
+"PS1" skin and the god violates that style on purpose (watercolor / "realistic" assets that *don't
+belong*) to unsettle the player. Chose "decay first, revealed later" over (a) god-is-decay-from-the-
+start (loses the rug-pull) and (b) two-distinct-forces (more to build/telegraph, no unification).
+
+**Three structural constraints to respect NOW** (so the reveal stays a re-skin): (1) shift
+*presentation* (cinematic/HUD/VO copy) is a swappable skin over shift *mechanics* — keep it data,
+not hardcoded; (2) the previewed next-state is *queryable and later-tamperable* — don't bake in
+"the preview never lies" (the god's first **lie in the preview** can BE the reveal); (3) grid↔world
+placement stays the single chokepoint, and "height is +Y" generalizes to a **face normal** — the
+lever that turns *walking on the underside/walls* from a coordinate-core rewrite into content.
+
+**Near-term build intent (a feel test, ahead of the full reveal):** "**walk to the bottom of the
+map**." Needs (a) the face-normal generalization of grid↔world + per-face reachability/jump-gating,
+and (b) **bottom caps on tile blocks** — extend the current two-layer tile (surface/cap + side
+`body`, §2026-06-24) to **three faces (top cap / sides / bottom cap)** so the underside can be made
+to look intentionally "wrong/unfinished" (dovetails with §10's load sequence frozen un-painted).
+Also surfaces a **meta-puzzle pattern**: the god imposes an off-style constraint (e.g. a "realistic"
+vine wraps the action menu, disabling it) that the player breaks via an *unexpected* use of an
+*existing* control (wiggle the camera to strain and snap the vine) — reusing `CameraController`.
+
+**Status:** Later / not built. Per `docs/GAME_DESIGN.md`, do not design in earnest until a single
+battle is fun and the shift ships — but the three constraints above guide the shift/grid work now.
+
+---
+
+## 2026-06-27 — Demo target: a scripted "proof of concept" vertical slice (full plan in DEMO_PLAN.md)
+
+**Decision (direction):** the first thing worth showing other people is a **scripted vertical
+slice** that proves the *feel* and lands the **meta-god reveal** — built to **send/show friends for
+feedback on the idea**, so it favors a tight authored experience over breadth. Full beat-by-beat in
+`docs/DEMO_PLAN.md`.
+
+**Shape:** foundational work first — (1) **map/encounter builder working**, (2) a **fun single
+battle**, (3) an **in-scene dialog/textbox system** (net-new) — then authored content: a scripted
+**tutorial battle you lose** (dialog with the first mini-boss, **The Bishop**) → a **cutscene**
+(you're a time wizard; respawn in the roguelite "in-between" hub; undo the god's decay curse) →
+a **run** of two battles with **upgrade picks** and a **reach-the-victory-tile** win → the **Bishop
+battle climax**: time-stop on the killing blow + god mocks the player, all enemies die but the
+battle continues, the camera snaps to the map's **underside** (lava pentagram on slate), enemies
+walk the map's **edges/faces** while a **summoner** spawns adds (kill-the-summoner is the real win),
+then the god seizes the scene — **warping walls with sideways enemies, destroying tiles** — to tease
+the mechanic's range.
+
+**Why logged:** it sets the near-term build priorities (encounter builder, dialog, win-conditions,
+reward picks, mid-battle spawns) and makes explicit that the **climax depends on faces Layer B**
+(the deferred coordinate-core gameplay) — so Layer B is the demo's critical path, worth de-risking
+early (e.g. the throwaway face spike). Net-new systems and the existing/in-progress map are tabled
+in `docs/DEMO_PLAN.md` §3.
+
+---
+
+## 2026-06-27 — Meta mechanics are permanent core; "face work" split Layer A (now) / Layer B (later)
+
+**Decision (resolves §11's permanence open question):** the god's rule-breaks — walking on tile
+**faces**, altered/disabled menus, mid-fight summons — **do not revert after the reveal**. They
+become a **permanent part of the battle problem-solving space, authored in the map/encounter
+builder** like any other mechanic; the game must **stand alone past the reveal**. So **faces are core
+infrastructure the builder sits on**, not a deferred set-piece.
+
+**Sequencing decision — build the builder ONCE, face-ready, by splitting "the face work":**
+- **Layer A — face *model* (data/addressing/collision): baked into the current builder pass.** A
+  `Face` enum (`TOP/NORTH/SOUTH/EAST/WEST/BOTTOM`); a tile *address* becomes `(Vector2i tile, Face
+  face)` **defaulted `TOP`**; unit placements + authored mechanics carry a `face` (defaulted `TOP`,
+  so face-authoring UI is **additive** later, not a rewrite); **bottom caps** (extend the two-layer
+  tile of §2026-06-24 to three faces: top cap / side / bottom cap, for the intentionally
+  "wrong/unfinished" underside); picking returns `(tile, face)`.
+- **Layer B — face *gameplay*: deferred, validated with the finished builder.** Gravity re-point
+  along a face normal, per-face reachability/jump-gating (the BFS assumes one 2D grid + height on one
+  axis today), unit orientation, and face-to-face traversal. Layer B *reads* the data Layer A produces.
+
+**Dividing line:** anything that, baked wrong, forces a **builder rewrite** is Layer A (decide now);
+the deep math is Layer B (defer). This is the reserve-a-slot-default-it pattern already used for
+reserved stats (`evasion`/`temporal_resist`) and reserved shift behaviors.
+
+**Collision finding (probably saves work):** **do NOT** assume physically separate colliders per
+face. (1) Godot's raycast returns the **hit `normal`**, so the existing *single box per tile* yields
+*which face* was clicked (world-normal → `Face`) — face identity is free from the current picker
+(§2026-06-19). (2) Units have **no collision** and movement is a **scripted point-queue walk**
+(§2026-06-19), so "walking along a side" is a coordinate/gravity problem (Layer B), not a collider
+problem. **Verify first:** that exposed side/bottom faces get hit cleanly by the ray on tall/occluded
+geometry. Lean: per-face *identity* + *addressing/placement data*, not per-face *physics shapes*.
+
+**Why this order (rejected alternatives):** rejected **face-gameplay-first** — it's the deepest,
+riskiest change to the coordinate core, and you validate its *feel* fastest with a working builder;
+doing it first means hand-authoring test fights in code. Rejected **finish-builder-then-bolt-on-faces
+with no forward-compat** — would force ripping out single-face addressing/placement to add the
+permanent face mechanics, i.e. building the builder twice. Layer A forward-compat (cheap now) avoids
+both. Optional **throwaway face spike** (hardcode one face-flip, no builder) remains available purely
+to feel it early, separate from the real Layer B effort.
+
+---
+
 ## 2026-06-25 — Map builder becomes an Encounter Builder (direction; data model deferred)
 
 **Decision (direction):** grow the map designer beyond terrain into a full **encounter
