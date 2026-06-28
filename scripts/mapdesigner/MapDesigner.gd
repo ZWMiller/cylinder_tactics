@@ -21,7 +21,12 @@ const NEW_MAP_HEIGHT := 10
 
 ## Height clamps while editing — keep tiles from going below ground or absurdly tall.
 const MIN_HEIGHT := 0
-const MAX_HEIGHT := 20
+const MAX_HEIGHT := 40
+
+## Starting height for every tile of a freshly-created map. Sits in the MIDDLE of the
+## [MIN_HEIGHT, MAX_HEIGHT] band so a new map can be carved DOWN (pits, ravines — now
+## that the underside matters) as easily as raised UP, ~20 levels either way.
+const NEW_TILE_HEIGHT := 20
 
 ## Where maps are saved/loaded by default (authored content lives in the project).
 const MAPS_DIR := "res://assets/maps"
@@ -43,7 +48,10 @@ const HUD_PANEL_WIDTH := 520
 ## Which tile attribute the mouse edits. RESIZE is the odd one out — it doesn't paint a
 ## tile, it grows/shrinks the grid at the hovered edge (L adds, R deletes; corners do
 ## both). It rides the same Tab cycle and L/R-click convention as the painting tools.
-enum Tool { HEIGHT, SURFACE, BODY, RESIZE }
+## SURFACE and BODY collapsed into one face-aware PAINT tool: it paints the active
+## terrain type onto WHICHEVER face you click — top, a side, or (orbiting under the map)
+## the underside — routed by the picked face normal (see `_paint_face` / `TileFaces`).
+enum Tool { HEIGHT, PAINT, RESIZE }
 
 ## The terrain types offered for painting, in palette order. Number keys 1-9 then 0
 ## quick-select the first ten; `[` / `]` cycle through all of them (so QUICKSAND, the
@@ -102,6 +110,13 @@ func _ready() -> void:
 	_field.states = _new_flat_states(NEW_MAP_WIDTH, NEW_MAP_HEIGHT)
 	add_child(_field)
 
+	# Let the designer camera orbit BENEATH the map (battle keeps the default top-down
+	# clamp). Lowering `min_pitch` below 0 is what makes the underside reachable for the
+	# face-aware PAINT tool — you fly under the board to click the BOTTOM face. Set here
+	# (scene-local) rather than on the shared CameraController default, so battles are
+	# unaffected. Stops short of straight-down (-90) where `look_at` would degenerate.
+	_camera.min_pitch = -80.0
+
 	# One theme drives every dialog's font size (built before the dialogs that use it).
 	_ui_theme = Theme.new()
 	_ui_theme.default_font_size = FONT_DIALOG
@@ -124,25 +139,27 @@ func _process(_delta: float) -> void:
 	var dialog_open := _dialog_open()
 	_camera.key_orbit_enabled = not dialog_open
 	if dialog_open:
-		_field.clear_active_tile()
+		_field.clear_hover_face()
 		_field.clear_resize_preview()
 		return
-	var tile := _field.tile_at_screen_point(_camera, get_viewport().get_mouse_position())
+	# Face-aware pick: the PAINT cursor highlights whichever FACE is under the mouse.
+	var pick := _field.tile_and_face_at_screen_point(_camera, get_viewport().get_mouse_position())
+	var tile: Vector2i = pick["tile"]
 	if _tool == Tool.RESIZE:
 		# No paint cursor in resize mode; the green/red edge previews carry the meaning.
-		_field.clear_active_tile()
+		_field.clear_hover_face()
 		var sides := _field.sides_at(tile.x, tile.y)   # [] off-grid or on an interior tile
 		if sides.is_empty():
 			_field.clear_resize_preview()
 		else:
 			_field.show_resize_preview(sides)
 		return
-	# Painting tools: white hover cursor, and make sure no stale resize ghost lingers.
+	# Painting tools: face hover cursor, and make sure no stale resize ghost lingers.
 	_field.clear_resize_preview()
 	if tile == Battlefield.INVALID_TILE:
-		_field.clear_active_tile()
+		_field.clear_hover_face()
 	else:
-		_field.set_active_tile(tile, HOVER_COLOR)
+		_field.set_hover_face(tile, pick["face"], HOVER_COLOR)
 
 
 ## Keyboard (tools / palette / file ops) and mouse painting. Uses `_unhandled_input` so
@@ -196,7 +213,11 @@ func _handle_key(keycode: int) -> void:
 
 ## Apply the current tool to the tile under the mouse. `primary` = left click.
 func _paint_under_mouse(primary: bool) -> void:
-	var tile := _field.tile_at_screen_point(_camera, get_viewport().get_mouse_position())
+	# Face-aware pick: we need both the tile AND which of its faces is under the cursor
+	# (the PAINT tool routes by face). `tile_and_face_at_screen_point` derives the face
+	# from the physics hit normal — see docs/FACES.md (Layer A).
+	var pick := _field.tile_and_face_at_screen_point(_camera, get_viewport().get_mouse_position())
+	var tile: Vector2i = pick["tile"]
 	if tile == Battlefield.INVALID_TILE:
 		return
 	# RESIZE acts on the grid, not a tile's data, so handle it before reading tile data.
@@ -208,16 +229,30 @@ func _paint_under_mouse(primary: bool) -> void:
 		return
 	match _tool:
 		Tool.HEIGHT:
-			# Left raises, right lowers — by one level, clamped.
+			# Left raises, right lowers — by one level, clamped. Preserve the underside.
 			var delta := 1 if primary else -1
 			var new_h: int = clampi(t["height"] + delta, MIN_HEIGHT, MAX_HEIGHT)
-			_field.set_tile(tile.x, tile.y, new_h, t["type"], t["body"])
-		Tool.SURFACE:
+			_field.set_tile(tile.x, tile.y, new_h, t["type"], t["body"], t.get("bottom", t["body"]))
+		Tool.PAINT:
 			if primary:
-				_field.set_tile(tile.x, tile.y, t["height"], _active_type, t["body"])
-		Tool.BODY:
-			if primary:
-				_field.set_tile(tile.x, tile.y, t["height"], t["type"], _active_type)
+				_paint_face(tile, t, pick["face"])
+
+
+## Paint `_active_type` onto the clicked `face` of tile (x, z), leaving its other faces
+## untouched. TOP sets the surface type, BOTTOM the underside type, and any of the four
+## sides the (shared) body type. This match is the single place "clicked face → which
+## layer" lives — it's what grows when N/S/E/W become independently typed (each side
+## would target its own field instead of all sharing `body`).
+func _paint_face(tile: Vector2i, t: Dictionary, face: int) -> void:
+	var bottom: int = t.get("bottom", t["body"])
+	match face:
+		TileFaces.Face.TOP:
+			_field.set_tile(tile.x, tile.y, t["height"], _active_type, t["body"], bottom)
+		TileFaces.Face.BOTTOM:
+			_field.set_tile(tile.x, tile.y, t["height"], t["type"], t["body"], _active_type)
+		_:
+			# NORTH / SOUTH / EAST / WEST all paint the one body type today.
+			_field.set_tile(tile.x, tile.y, t["height"], t["type"], _active_type, bottom)
 
 
 ## Grow or shrink the map at the hovered edge `tile`. Left-click (`primary`) ADDS a
@@ -255,14 +290,14 @@ func _digit_for_keycode(keycode: int) -> int:
 
 # --- New-map data -----------------------------------------------------------
 
-## A single-state map of `w` x `h` flat grass tiles (height 1, dirt sides) — the blank
+## A single-state map of `w` x `h` flat grass tiles (height `NEW_TILE_HEIGHT`, dirt sides) — the blank
 ## canvas a New starts from. Returns the nested `states` form the field renders.
 func _new_flat_states(w: int, h: int) -> Array:
 	var grid: Array = []
 	for x in w:
 		var column: Array = []
 		for z in h:
-			column.append({"height": 1, "type": TileTypes.Type.GRASS, "body": TileTypes.Type.DIRT})
+			column.append({"height": NEW_TILE_HEIGHT, "type": TileTypes.Type.GRASS, "body": TileTypes.Type.DIRT, "bottom": TileTypes.Type.DIRT})
 		grid.append(column)
 	return [grid]
 
@@ -533,8 +568,9 @@ func _refresh_label() -> void:
 		"Type: %s            [ and ] cycle, 1-0 quick-pick" % TileTypes.Type.keys()[_active_type],
 		"",
 		"HEIGHT tool: L-click raise, R-click lower",
-		"SURFACE / BODY tool: L-click paints the active type",
+		"PAINT tool: L-click paints the active type on the clicked FACE",
+		"   top=surface, sides=body, underside=bottom (orbit under the map to reach it)",
 		"RESIZE tool: hover an edge — L-click adds, R-click deletes (corner = both sides)",
-		"Camera: wheel zoom, Q/E orbit, middle-drag free-orbit",
+		"Camera: wheel zoom, Q/E orbit, middle-drag free-orbit (drag down to go under)",
 		"[N] new   [R] rename   [S] save   [L] load",
 	])

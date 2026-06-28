@@ -75,6 +75,13 @@ const _ORTHO_DIRS := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(
 ## Thin, so most of a cliff face reads as brown earth.
 @export var cap_thickness: float = 0.12
 
+## How many height *levels* of body to always draw beneath a tile's top, even where it
+## has no lower neighbour (flat ground, the map border). Keeps a flat map from rendering
+## as a paper-thin sheet — and is the minimum underside thickness. A tile that DOES have a
+## lower neighbour draws down to that neighbour instead (covering the cliff), so this only
+## sets the floor for the no-cliff case. Bump it for chunkier slabs.
+@export var min_body_depth: int = 1
+
 # --- Runtime state -----------------------------------------------------------
 
 ## The ordered list of time-states. Leave empty to use the built-in DemoMap, or
@@ -278,6 +285,37 @@ func tile_height(x: int, z: int) -> float:
 ## and combat will build on this.
 func tile_to_world(x: int, z: int) -> Vector3:
 	return Vector3(_grid_to_world_x(x), tile_height(x, z), _grid_to_world_z(z))
+
+
+## World Y of tile (x, z)'s column UNDERSIDE in the current state — where its drawn body
+## (and its bottom cap) bottoms out. Public so the designer's grid overlay can outline the
+## underside at the same level the renderer uses. See `_column_bottom_in`.
+func column_bottom(x: int, z: int) -> float:
+	return _column_bottom_in(current_state(), x, z)
+
+
+## World Y of a tile's column underside within a given `state` (used by `render_state`,
+## which draws an arbitrary state, and by `column_bottom` for the current one).
+##
+## The body only drops to the LOWEST orthogonally-adjacent surface, so a side face spans
+## exactly the exposed cliff instead of always running to y=0 — and a tile beside a carved
+## pit drops to the pit's top, covering the pit wall. With no lower neighbour (flat ground,
+## or the map edge — off-grid neighbours are treated as no cliff), it falls back to a thin
+## `min_body_depth`-level slab so the tile isn't paper-thin.
+func _column_bottom_in(state: Array, x: int, z: int) -> float:
+	var top: float = state[x][z]["height"] * height_step
+	var lowest: float = top
+	for dir in _ORTHO_DIRS:
+		var d: Vector2i = dir
+		var nx: int = x + d.x
+		var nz: int = z + d.y
+		if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
+			var nt: float = state[nx][nz]["height"] * height_step
+			if nt < lowest:
+				lowest = nt
+	if lowest < top:
+		return lowest                       # cover the cliff down to the lowest neighbour
+	return top - float(min_body_depth) * height_step   # flat/border: a thin minimum slab
 
 
 ## Densify a sparse list of waypoint tiles into a list of orthogonally *adjacent*
@@ -782,6 +820,14 @@ func _build_tiles() -> void:
 			surface.mesh = _unit_box
 			root.add_child(surface)
 
+			# A matching colored cap on the UNDERSIDE, so the bottom face can carry its
+			# own terrain type independent of the top/sides (see docs/FACES.md — the
+			# meta-god reveal's authored underside). Mirrors `surface`; colored in
+			# `render_state` via `TileFaces.face_type(tile, BOTTOM)`.
+			var bottom := MeshInstance3D.new()
+			bottom.mesh = _unit_box
+			root.add_child(bottom)
+
 			# An invisible collision box so mouse-clicks can be ray-picked back to
 			# this tile (see `tile_at_screen_point`). The body carries its own grid
 			# coordinate as metadata, so a ray hit maps straight to (x, z) with no
@@ -795,7 +841,7 @@ func _build_tiles() -> void:
 			body.add_child(collision)
 			root.add_child(body)
 
-			column.append({"earth": earth, "surface": surface, "collision": collision})
+			column.append({"earth": earth, "surface": surface, "bottom": bottom, "collision": collision})
 		_tiles.append(column)
 
 
@@ -808,36 +854,52 @@ func render_state(index: int) -> void:
 		for z in grid_height:
 			var tile: Dictionary = state[x][z]
 			var surface_top: float = tile["height"] * height_step
+			# The column's UNDERSIDE: only as deep as the lowest adjacent surface (so a side
+			# face spans exactly the exposed cliff, not all the way to y=0), with a thin
+			# minimum slab on flat ground / borders. A carved-down tile's neighbours are
+			# taller, so THEIR underside drops to this tile's top — covering the pit wall.
+			var base_y: float = _column_bottom_in(state, x, z)
+			var total: float = maxf(surface_top - base_y, 0.02)
 
-			# Split the total height into a brown column and a thin colored cap.
-			# Clamp so a very short tile still shows a sliver of column.
-			var cap_h: float = min(cap_thickness, surface_top * 0.5)
-			var column_h: float = max(surface_top - cap_h, 0.02)
+			# Split the column into a brown middle plus a thin colored cap on the TOP and the
+			# BOTTOM. Dividing by 3 reserves room for BOTH caps even on a very short block; a
+			# normal block still gets the full `cap_thickness`. The three layers (bottom cap /
+			# column / top cap) stack from `base_y` up to `surface_top`.
+			var cap_h: float = min(cap_thickness, total / 3.0)
+			var column_h: float = max(total - 2.0 * cap_h, 0.02)
 
 			var refs: Dictionary = _tiles[x][z]
 
+			# Underside cap: a thin slab at the block's base, colored by the tile's BOTTOM
+			# face type (defaults to the body color — see TileFaces.face_type).
+			var bottom: MeshInstance3D = refs["bottom"]
+			bottom.scale = Vector3(tile_size, cap_h, tile_size)
+			bottom.position = Vector3(0.0, base_y + cap_h * 0.5, 0.0)
+			var bottom_type: int = TileFaces.face_type(tile, TileFaces.Face.BOTTOM)
+			bottom.material_override = _earth_material if bottom_type == TileTypes.Type.DIRT else _surface_material(bottom_type)
+
 			# A scaled 1x1x1 box: scale.y is the height, scale.x/z the footprint.
-			# Position is the box *center*, so half the height sits above y=0.
+			# Position is the box *center*; the column sits ABOVE the bottom cap.
 			var earth: MeshInstance3D = refs["earth"]
 			earth.scale = Vector3(tile_size, column_h, tile_size)
-			earth.position = Vector3(0.0, column_h * 0.5, 0.0)
+			earth.position = Vector3(0.0, base_y + cap_h + column_h * 0.5, 0.0)
 			# The column (sides) are colored by the tile's BODY type — brown dirt by
 			# default, or a built-block color (e.g. stucco) so it doesn't show earth.
 			# DIRT reuses the one shared brown material; other bodies get a cached one.
-			var body_type: int = tile.get("body", TileTypes.DEFAULT_BODY)
+			# (All four sides share one body type today — TileFaces.face_type centralizes
+			# that so per-side types are an additive change later, not a reshape here.)
+			var body_type: int = TileFaces.face_type(tile, TileFaces.Face.NORTH)
 			earth.material_override = _earth_material if body_type == TileTypes.Type.DIRT else _surface_material(body_type)
 
 			var surface: MeshInstance3D = refs["surface"]
 			surface.scale = Vector3(tile_size, cap_h, tile_size)
-			surface.position = Vector3(0.0, column_h + cap_h * 0.5, 0.0)
-			surface.material_override = _surface_material(tile["type"])
+			surface.position = Vector3(0.0, surface_top - cap_h * 0.5, 0.0)
+			surface.material_override = _surface_material(TileFaces.face_type(tile, TileFaces.Face.TOP))
 
-			# Keep the click-collision box in sync with the visible column so
-			# picking stays correct after a time-shift. It spans the full tile,
-			# from the ground (y=0) up to the surface top. A BoxShape3D's `size`
-			# is its full extent, and it is centered on its node, so half the
-			# height sits above y=0 — same convention as the meshes above.
+			# Keep the click-collision box in sync with the VISIBLE block ([base_y, top]),
+			# so picking stays correct after a shift AND a click on the underside / a side
+			# face lands on real geometry (needed by the designer's face-aware tools).
 			var collision: CollisionShape3D = refs["collision"]
-			var pick_h: float = max(surface_top, 0.02)
+			var pick_h: float = max(total, 0.02)
 			(collision.shape as BoxShape3D).size = Vector3(tile_size, pick_h, tile_size)
-			collision.position = Vector3(0.0, pick_h * 0.5, 0.0)
+			collision.position = Vector3(0.0, base_y + pick_h * 0.5, 0.0)

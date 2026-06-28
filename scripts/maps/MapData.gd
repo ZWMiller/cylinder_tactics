@@ -36,23 +36,29 @@ extends Resource
 
 
 ## Rebuild the runtime nested form `Battlefield` consumes: an Array (one per state) of
-## `grid[x][z] = { "height": int, "type": int, "body": int }`. Inverse of `from_states`.
-## A `bodies` array missing entirely (a map saved before bodies existed) falls back to
-## `TileTypes.DEFAULT_BODY` per tile, so older maps render with brown dirt sides as before.
+## `grid[x][z] = { "height": int, "type": int, "body": int, "bottom": int }`. Inverse of
+## `from_states`. A `bodies` array missing entirely (a map saved before bodies existed)
+## falls back to `TileTypes.DEFAULT_BODY` per tile; a missing `bottoms` array falls back
+## to that tile's body — so older maps render with brown dirt sides and matching
+## undersides exactly as before.
 func to_states() -> Array:
 	var result: Array = []
 	for st in states:
 		var has_bodies := st.bodies.size() == st.heights.size()
+		var has_bottoms := st.bottoms.size() == st.heights.size()
 		var grid: Array = []
 		for x in width:
 			var column: Array = []
 			for z in height:
 				# Row-major flat index — must match the packing in `from_states`.
 				var idx := x * height + z
+				var body: int = st.bodies[idx] if has_bodies else TileTypes.DEFAULT_BODY
 				column.append({
 					"height": st.heights[idx],
 					"type": st.types[idx],
-					"body": st.bodies[idx] if has_bodies else TileTypes.DEFAULT_BODY,
+					"body": body,
+					# Unauthored/legacy undersides inherit the side color (see MapState).
+					"bottom": st.bottoms[idx] if has_bottoms else body,
 				})
 			grid.append(column)
 		result.append(grid)
@@ -76,6 +82,7 @@ static func from_states(p_states: Array, p_name: String = "Untitled") -> MapData
 		st.heights.resize(data.width * data.height)
 		st.types.resize(data.width * data.height)
 		st.bodies.resize(data.width * data.height)
+		st.bottoms.resize(data.width * data.height)
 		for x in data.width:
 			for z in data.height:
 				var idx := x * data.height + z
@@ -83,7 +90,10 @@ static func from_states(p_states: Array, p_name: String = "Untitled") -> MapData
 				st.heights[idx] = tile["height"]
 				st.types[idx] = tile["type"]
 				# Tolerate tiles without an explicit body (older procedural output).
-				st.bodies[idx] = tile.get("body", TileTypes.DEFAULT_BODY)
+				var body: int = tile.get("body", TileTypes.DEFAULT_BODY)
+				st.bodies[idx] = body
+				# An unauthored underside is saved inheriting the side color.
+				st.bottoms[idx] = tile.get("bottom", body)
 		data.states.append(st)
 	return data
 

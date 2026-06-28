@@ -12,7 +12,7 @@ in code, per the project's code-driven workflow.
 | `scripts/Battlefield.gd` | `Battlefield` | Generic, size-agnostic grid engine: holds states, builds tile geometry, renders/cycles. |
 | `scripts/maps/DemoMap.gd` | `DemoMap` | One concrete map *configuration*: the 3-state grassland→canyon→desert cycle, generated procedurally. |
 | `scripts/maps/MapData.gd` | `MapData` | The **saved map format** (a `Resource`): name + dimensions + an ordered list of states. Round-trips to/from the runtime nested form and saves to `.tres`. |
-| `scripts/maps/MapState.gd` | `MapState` | One time-state inside a `MapData`, as three flat `PackedInt32Array`s (heights + surface types + body types). Sub-resource; never instantiated standalone. |
+| `scripts/maps/MapState.gd` | `MapState` | One time-state inside a `MapData`, as four flat `PackedInt32Array`s (heights + surface types + body types + bottom/underside types). Sub-resource; never instantiated standalone. |
 
 `class_name` registers each script globally, so they reference each other by name
 (e.g. `TileTypes.Type.GRASS`) with no `preload`. None of the three is instantiated as
@@ -20,12 +20,17 @@ an object except `Battlefield`, which is a `Node3D` in `scenes/Main.tscn`.
 
 ## Data model
 
-- **Tile** — a `Dictionary` `{ "height": int, "type": int, "body": int }` (`type`/`body`
-  are `TileTypes.Type`). **Two-layer:** `type` is the **surface/cap** — the tile you stand
-  on, driving the cap color *and* gameplay (move cost, liquid, casting, hazard); `body` is
-  the **column/side** color only (cosmetic), defaulting to `DIRT`. The split lets one tile
-  be a stucco building (`body = BUILDING`) with a slate roof (`type = ROOF`). Gameplay
-  always reads the surface `type`, never the body. *(Kept as a Dictionary for prototype
+- **Tile** — a `Dictionary` `{ "height": int, "type": int, "body": int, "bottom": int }`
+  (the type fields are `TileTypes.Type`). **Per-face:** `type` is the **top surface/cap** —
+  the tile you stand on, driving the cap color *and* gameplay (move cost, liquid, casting,
+  hazard); `body` is the **column/side** color (the four N/S/E/W faces share it today);
+  `bottom` is the **underside** cap, drawn as its own slab so the map's bottom can be
+  authored independently (the meta-god reveal's underside — see `docs/FACES.md`). `body`
+  and `bottom` are cosmetic, defaulting to `DIRT` / the body color respectively. The split
+  lets one tile be a stucco building (`body = BUILDING`) with a slate roof (`type = ROOF`).
+  Gameplay always reads the top surface `type`, never the body/bottom. Every face→type
+  lookup goes through **`TileFaces.face_type(tile, face)`** — the single seam that makes
+  per-side (N/S/E/W) types an additive change later. *(Kept as a Dictionary for prototype
   simplicity; may become a Resource later.)*
 - **State** — a 2D grid of tiles indexed `state[x][z]`.
 - **`states`** — the ordered list of states. The shift cycles through them and wraps
@@ -46,15 +51,31 @@ seed of the future shared coordinate-helper module (movement / LoS / combat).
 
 ## Rendering (geometry only — no textures)
 
-Each tile is two scaled instances of a single shared 1×1×1 `BoxMesh`:
+Each tile is three scaled instances of a single shared 1×1×1 `BoxMesh`, stacked from the
+tile's **column bottom** up to its top surface:
+- a thin **underside cap** at the base, colored by the `bottom` face type,
 - a **column** for the body/sides, colored by the tile's `body` type
   (`TileTypes.surface_color(body)` — brown `DIRT` by default, or a built-block color), and
 - a thin **colored surface cap** (`TileTypes.surface_color(type)`) on top.
 
-Height differences expose the column as a cliff; flush neighbors hide their shared sides.
-`DIRT` bodies reuse one shared brown material; other body types get a cached per-type
-material (same cache as the caps). One shared mesh + per-instance scale/`material_override`
-keeps ~1,150 tile pieces cheap. A tile of height `H` rises `H * height_step` world units.
+**Column depth is neighbor-aware** (`column_bottom` / `_column_bottom_in`): a tile's body
+only drops to the **lowest orthogonally-adjacent surface**, so a side face spans exactly
+the exposed cliff rather than always running to `y=0`. A tile beside a carved-down pit is
+taller than it, so *its* body drops to the pit's top — automatically covering the pit wall
+("the touching tiles go down to match"). With no lower neighbor (flat ground, or the map
+edge — off-grid neighbors are treated as no cliff) it falls back to a thin slab of
+`min_body_depth` levels, so flat maps aren't paper-thin. The click-collision box matches
+this drawn block (`[column_bottom, top]`), so clicking a side or the underside lands on
+real geometry (needed by the designer's face-aware tools).
+
+Cap thickness is `min(cap_thickness, depth/3)` so both caps fit even on a very thin block;
+at normal depths it stays the full `cap_thickness`. When `bottom` equals `body` (the
+default), the underside slab matches the column color — only an *authored* underside differs.
+
+Flush neighbors hide their shared sides. `DIRT` bodies reuse one shared brown material;
+other body types get a cached per-type material (same cache as the caps). One shared mesh +
+per-instance scale/`material_override` keeps the tile pieces cheap. A tile of height `H`
+rises `H * height_step` world units.
 
 ## Shift API (intentionally small and public)
 
@@ -93,10 +114,12 @@ as a unit's `jump` stat), and each orthogonal step costs 1 `move` point.
 The persistent, on-disk twin of the procedural `DemoMap` — what the map designer writes
 and what `Battlefield` can load. A **`MapData`** resource carries `map_name`, its own
 `width`/`height`, and `states: Array[MapState]` (the shift sequence). A **`MapState`**
-stores one state as three flat `PackedInt32Array`s — `heights`, `types` (surface/cap),
-and `bodies` (column/side) — laid out row-major in X (`index = x * height + z`). A
-`bodies` array missing entirely (a map saved before the field existed) falls back to
-`DIRT` per tile on load, so older maps look unchanged.
+stores one state as four flat `PackedInt32Array`s — `heights`, `types` (surface/cap),
+`bodies` (column/side), and `bottoms` (underside cap) — laid out row-major in X
+(`index = x * height + z`). Missing arrays fall back on load (same back-compat pattern):
+an absent `bodies` → `DIRT` per tile; an absent `bottoms` → that tile's body color. So
+older maps look unchanged. Per-side (N/S/E/W) types would be added the same way — more
+parallel arrays, not a reshape.
 
 - **Why flat arrays:** Godot only serializes `@export`ed properties, and the runtime
   nested `state[x][z] = {height, type}` form (a ragged nest of Dictionaries) round-trips

@@ -59,6 +59,20 @@ var _delete_material: StandardMaterial3D
 ## Lift the delete decal a hair above the cap (matches the active-marker lift).
 const _DELETE_LIFT := 0.05
 
+# --- Face-aware hover cursor ------------------------------------------------
+
+## A single translucent quad laid over whichever tile FACE is under the cursor. The base
+## `set_active_tile` only marks a tile's TOP, so it can't show what you're hovering on the
+## underside or a side (now that the PAINT tool targets any face) — this can. One reusable
+## node, re-oriented per face; lazily built on first hover.
+var _hover_marker: MeshInstance3D
+var _hover_material: StandardMaterial3D
+var _hover_mesh: PlaneMesh
+
+## Nudge the hover quad this far off the face (and inset from the edges) so it floats just
+## in front of the surface instead of z-fighting it.
+const _HOVER_LIFT := 0.03
+
 
 ## Render like the base, then (re)draw the tile-edge grid on top. Virtual dispatch means
 ## every base call site (`_ready`, `set_tile`, `load_states`) refreshes the grid for free.
@@ -90,31 +104,33 @@ func load_states(new_states: Array) -> void:
 	render_state(_current_index)
 
 
-## The tile data `{ "height", "type", "body" }` at (x, z) in the state currently shown.
-## Returns a COPY so callers can read (e.g. to raise a height relative to the current
-## one) without aliasing the stored dict. Empty dict if (x, z) is off the grid.
+## The tile data `{ "height", "type", "body", "bottom" }` at (x, z) in the state currently
+## shown. Returns a COPY so callers can read (e.g. to raise a height relative to the
+## current one) without aliasing the stored dict. Empty dict if (x, z) is off the grid.
 func tile_data(x: int, z: int) -> Dictionary:
 	if not _in_bounds(x, z):
 		return {}
 	return (current_state()[x][z] as Dictionary).duplicate()
 
 
-## Set the tile at (x, z) in the current state to the given height + surface/body types,
-## then redraw. Redrawing the whole (small) designer state per edit is cheap; brush
-## strokes that touch many tiles should use `set_tiles` to redraw only once.
-func set_tile(x: int, z: int, height: int, surface_type: int, body_type: int) -> void:
-	if not _write_tile(x, z, height, surface_type, body_type):
+## Set the tile at (x, z) in the current state to the given height + surface/body/bottom
+## types, then redraw. `bottom_type < 0` means "inherit the body color" (the default for a
+## tile whose underside isn't deliberately authored). Redrawing the whole (small) designer
+## state per edit is cheap; brush strokes that touch many tiles should use `set_tiles`.
+func set_tile(x: int, z: int, height: int, surface_type: int, body_type: int, bottom_type: int = -1) -> void:
+	if not _write_tile(x, z, height, surface_type, body_type, bottom_type):
 		return
 	render_state(_current_index)
 
 
 ## Apply a batch of edits, then redraw ONCE. Each entry is a Dictionary
-## `{ "x", "z", "height", "type", "body" }`. This is the efficient path the shape
-## brushes (square/circle/line/hill) use — one repaint for the whole footprint.
+## `{ "x", "z", "height", "type", "body" }` with an optional `"bottom"` (omitted →
+## inherit the body color). This is the efficient path the shape brushes (square/circle/
+## line/hill) use — one repaint for the whole footprint.
 func set_tiles(edits: Array) -> void:
 	var any := false
 	for e in edits:
-		if _write_tile(e["x"], e["z"], e["height"], e["type"], e["body"]):
+		if _write_tile(e["x"], e["z"], e["height"], e["type"], e["body"], e.get("bottom", -1)):
 			any = true
 	if any:
 		render_state(_current_index)
@@ -129,12 +145,15 @@ func redraw() -> void:
 # --- internal ---------------------------------------------------------------
 
 ## Write one tile's data into the current state WITHOUT redrawing. Returns whether the
-## write landed (false if off-grid). Replaces the dict wholesale so the three keys are
-## always present and consistent.
-func _write_tile(x: int, z: int, height: int, surface_type: int, body_type: int) -> bool:
+## write landed (false if off-grid). Replaces the dict wholesale so all four keys are
+## always present and consistent. `bottom_type < 0` inherits the body color, so callers
+## that don't care about the underside (height/surface/body tools, brushes) leave it to
+## match the sides — the default for an unauthored underside (see TileFaces.face_type).
+func _write_tile(x: int, z: int, height: int, surface_type: int, body_type: int, bottom_type: int = -1) -> bool:
 	if not _in_bounds(x, z):
 		return false
-	current_state()[x][z] = {"height": height, "type": surface_type, "body": body_type}
+	var bottom: int = bottom_type if bottom_type >= 0 else body_type
+	current_state()[x][z] = {"height": height, "type": surface_type, "body": body_type, "bottom": bottom}
 	return true
 
 
@@ -159,9 +178,10 @@ func _add_post(posts: Dictionary, wx: float, wz: float, y0: float, y1: float, d:
 		posts[key] = {"x": wx, "z": wz, "y0": y0, "y1": y1, "nx": d.x, "nz": d.y}
 
 
-## Rebuild the line mesh outlining the WHOLE grid: every tile's top square, plus a vertical
-## post down each exposed cliff corner (where a tile stands taller than the neighbour it
-## abuts, or sits at the map border). So steps and cliffs read fully, not just the tops.
+## Rebuild the line mesh outlining the WHOLE grid: every tile's top AND underside square,
+## plus a vertical post down each exposed cliff corner (where a tile stands taller than the
+## neighbour it abuts, or sits at the map border). So steps and cliffs read fully, not just
+## the tops, and the underside reads as a grid when the camera orbits beneath the map.
 ## Cheap (a few hundred–thousand verts even at 24x24), built as one PRIMITIVE_LINES
 ## ArrayMesh so the whole grid is a single draw. The overlay node persists across loads.
 func _rebuild_grid_overlay() -> void:
@@ -199,14 +219,27 @@ func _rebuild_grid_overlay() -> void:
 			verts.append_array([Vector3(x1, y, z1), Vector3(x0, y, z1)])
 			verts.append_array([Vector3(x0, y, z1), Vector3(x0, y, z0)])
 
-			# For each side that DROPS to a shorter neighbour (or the border, treated as
-			# ground), record a post at the two corners of that edge spanning the neighbour's
-			# top up to this tile's top, tagged with the face normal so coincident posts merge.
+			# The same four edges on the UNDERSIDE, at this tile's column bottom (which the
+			# renderer computes from the lowest neighbour / the thin-slab minimum — so the
+			# outline meets the drawn geometry), lifted a hair below it so the grid reads
+			# when the camera orbits under the map.
+			var bb := column_bottom(x, z)
+			var yb := bb - _GRID_LIFT
+			verts.append_array([Vector3(x0, yb, z0), Vector3(x1, yb, z0)])
+			verts.append_array([Vector3(x1, yb, z0), Vector3(x1, yb, z1)])
+			verts.append_array([Vector3(x1, yb, z1), Vector3(x0, yb, z1)])
+			verts.append_array([Vector3(x0, yb, z1), Vector3(x0, yb, z0)])
+
+			# For each side that DROPS to a shorter neighbour (or the map border), record a
+			# post at the two corners of that edge spanning the exposed face up to this tile's
+			# top, tagged with the face normal so coincident posts merge. The face bottoms out
+			# at the neighbour's top; at the border (off-grid) it bottoms at THIS tile's column
+			# bottom, matching the thin slab the renderer draws there (not down to y=0).
 			for dir in _ORTHO_DIRS:
 				var d: Vector2i = dir   # typed copy — `_ORTHO_DIRS` is untyped (Variant members)
 				var nx: int = x + d.x
 				var nz: int = z + d.y
-				var neighbour_top := 0.0   # off-grid border: face is exposed down to ground
+				var neighbour_top := bb   # off-grid border: face is exposed only to the slab bottom
 				if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
 					neighbour_top = state[nx][nz]["height"] * height_step
 				if top - neighbour_top <= 0.001:
@@ -340,6 +373,68 @@ func clear_resize_preview() -> void:
 		d.visible = false
 
 
+## Highlight the given `face` of tile (x, z) with a translucent `color` quad — the designer
+## hover cursor, face-aware so you can see what you're pointing at on the top, the underside,
+## or a side. The quad is oriented onto that face (TOP/BOTTOM flat; the four sides vertical,
+## spanning the full column height) and nudged out by `_HOVER_LIFT`. Off-grid hides it.
+func set_hover_face(tile: Vector2i, face: int, color: Color) -> void:
+	if not _in_bounds(tile.x, tile.y):
+		clear_hover_face()
+		return
+	if _hover_marker == null:
+		_hover_mesh = PlaneMesh.new()
+		_hover_mesh.size = Vector2.ONE   # unit quad; scaled per use
+		_hover_material = StandardMaterial3D.new()
+		_hover_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_hover_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		# Double-sided so the quad shows whether the camera is above, below, or beside it.
+		_hover_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_hover_marker = MeshInstance3D.new()
+		_hover_marker.name = "HoverFace"
+		_hover_marker.mesh = _hover_mesh
+		_hover_marker.material_override = _hover_material
+		add_child(_hover_marker)
+	_hover_material.albedo_color = color
+
+	var c := tile_to_world(tile.x, tile.y)   # center of the TOP surface
+	var top := c.y                            # world Y of the surface
+	var bb := column_bottom(tile.x, tile.y)   # world Y of the drawn column's underside
+	var depth := maxf(top - bb, 0.02)         # visible side-face height
+	var mid := (top + bb) * 0.5               # vertical center of the block
+	var half := tile_size * 0.5
+	var inset := tile_size * 0.96             # sit just inside the tile edges
+	var m := _hover_marker
+	# A PlaneMesh lies in its local XZ plane (normal +local Y); rotate it onto each face.
+	match face:
+		TileFaces.Face.TOP:
+			m.rotation = Vector3.ZERO
+			m.scale = Vector3(inset, 1.0, inset)
+			m.position = Vector3(c.x, top + _HOVER_LIFT, c.z)
+		TileFaces.Face.BOTTOM:
+			m.rotation = Vector3.ZERO
+			m.scale = Vector3(inset, 1.0, inset)
+			m.position = Vector3(c.x, bb - _HOVER_LIFT, c.z)
+		TileFaces.Face.EAST, TileFaces.Face.WEST:
+			# Rotate 90° about Z: local X→world Y (face height), local Z→world Z (depth).
+			m.rotation = Vector3(0.0, 0.0, PI / 2.0)
+			m.scale = Vector3(depth, 1.0, inset)
+			var sx: float = (half + _HOVER_LIFT) if face == TileFaces.Face.EAST else (-half - _HOVER_LIFT)
+			m.position = Vector3(c.x + sx, mid, c.z)
+		_:   # NORTH (−Z) / SOUTH (+Z)
+			# Rotate 90° about X: local X→world X (width), local Z→world Y (face height).
+			m.rotation = Vector3(PI / 2.0, 0.0, 0.0)
+			m.scale = Vector3(inset, 1.0, depth)
+			var sz: float = (-half - _HOVER_LIFT) if face == TileFaces.Face.NORTH else (half + _HOVER_LIFT)
+			m.position = Vector3(c.x, mid, c.z + sz)
+	m.visible = true
+
+
+## Hide the face hover cursor.
+func clear_hover_face() -> void:
+	if _hover_marker != null:
+		_hover_marker.visible = false
+
+
 ## Lay green ghost boxes one tile beyond each added side (plus the diagonal corner box
 ## when two orthogonal sides are added), each scaled to the height of the edge tile it
 ## mirrors, so the preview looks like the terrain extended outward.
@@ -355,12 +450,15 @@ func _show_add_ghost(sides: Array) -> void:
 	for i in cells.size():
 		var cell: Dictionary = cells[i]
 		var box := _claim_ghost(i)
+		# Mirror the edge tile's DRAWN block (top down to its column bottom), so the ghost
+		# previews a thin slab matching the new render model instead of a full-height cube.
 		var src_top: float = current_state()[cell["sx"]][cell["sz"]]["height"] * height_step
-		var h: float = maxf(src_top, 0.05)   # keep a flat (height-0) edge previewable
+		var src_bottom: float = column_bottom(cell["sx"], cell["sz"])
+		var h: float = maxf(src_top - src_bottom, 0.05)   # keep a flat (height-0) edge previewable
 		box.scale = Vector3(tile_size, h, tile_size)
 		# `_grid_to_world_x/z` apply the centering formula to ANY int, including the
 		# out-of-grid -1 / max indices, so the ghost sits exactly one tile past the edge.
-		box.position = Vector3(_grid_to_world_x(cell["gx"]), h * 0.5, _grid_to_world_z(cell["gz"]))
+		box.position = Vector3(_grid_to_world_x(cell["gx"]), src_bottom + h * 0.5, _grid_to_world_z(cell["gz"]))
 		box.visible = true
 	for i in range(cells.size(), _ghost_pool.size()):
 		_ghost_pool[i].visible = false

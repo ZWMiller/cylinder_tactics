@@ -54,6 +54,34 @@ in `docs/DECISION_LOG.md`.)
 Nothing acts on the face yet (gameplay still uses the tile, i.e. `TOP` implicitly), so this
 slice is a zero-behavior-change, fully reversible foundation.
 
+## Built: per-face tile types + bottom-cap rendering (Layer A, second slice)
+
+The tile data model and renderer now carry a *type per face*, so the underside (and, later,
+each side) can be authored independently — the engine support for the meta-god reveal's
+"wrong" underside and walkable faces.
+
+- **`TileFaces.face_type(tile, face) -> int`** is the single resolver from a face to the
+  terrain type shown on it. Today: `TOP` → the tile's `type` (also the gameplay surface),
+  the four sides → the shared `body`, `BOTTOM` → a new `bottom` field (falling back to
+  `body`, then `DIRT`). **Every** renderer/gameplay caller routes through this one function,
+  so making N/S/E/W independently typed later is a one-function change plus storage — not a
+  reshape.
+- **Saved format** (`MapState`/`MapData`): a new `bottoms` flat `PackedInt32Array` parallel
+  to `heights`/`types`/`bodies`, with the same "absent → fall back" back-compat rule (a map
+  saved before this field loads with its underside matching its sides). Per-side arrays would
+  be added the same additive way.
+- **Rendering** (`Battlefield`): each tile is now three stacked caps/column — a **bottom
+  cap** at the base, the body column, and the top cap — summing to the same height (picking
+  unchanged). With `bottom == body` (the default) the underside is invisible, so normal maps
+  and battles are visually unchanged; only an *authored* underside differs.
+- **Authoring** (map designer): `SURFACE`/`BODY` collapsed into one **face-aware `PAINT`
+  tool** — it paints the active type onto whichever face you click (top → surface, side →
+  body, underside → bottom), routed by the picked face from `tile_and_face_at_screen_point`.
+  To reach the underside the designer camera's `min_pitch` is lowered (scene-local, battle
+  unaffected) so you can orbit **beneath** the map; the battle camera keeps its top-down clamp.
+
+Still no *gameplay* on non-top faces — `bottom`/side types are cosmetic until Layer B.
+
 ### Verifying it
 
 - **Deterministic:** `from_normal` was checked headless against known ±axis normals (with
@@ -68,8 +96,9 @@ slice is a zero-behavior-change, fully reversible foundation.
 
 **Rest of Layer A** (later builder-pass slices): a tile *address* of `(tile, face)` threaded
 through unit placements and authored mechanics (defaulted `TOP`, so face-authoring UI is
-additive); **bottom-cap rendering** (extend the two-layer tile — top cap / side `body` — to
-three faces so the underside can look intentionally "unfinished").
+additive); **independently-typed sides** (N/S/E/W each their own type — the `face_type`
+resolver and the flat-array format are already shaped for this additive step).
+*(Done in the slices above: bottom-cap rendering + the per-face type model.)*
 
 **Layer B** (the coordinate-core change): gravity re-point along a face normal, per-face
 reachability/jump-gating (the BFS assumes one 2D grid + height on one axis today), unit

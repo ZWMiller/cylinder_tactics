@@ -76,6 +76,34 @@ static func normal(face: Face) -> Vector3:
 	return Vector3.UP
 
 
+## Resolve the terrain TYPE shown on a given face of a runtime tile dictionary.
+##
+## A runtime tile (see `Battlefield` / `MapData.to_states`) is a plain Dictionary
+## `{ "height", "type", "body", "bottom" }`. This is the SINGLE place a face maps to
+## one of those fields, so making the four sides (N/S/E/W) independently typed later is
+## a one-function change here plus new storage — every renderer/gameplay caller already
+## routes through this. Today:
+##   - `TOP`    → `type`   (the surface/cap; ALSO the gameplay type — move cost, liquid…)
+##   - sides    → `body`   (all four N/S/E/W share the one body type for now)
+##   - `BOTTOM` → `bottom` (the underside cap; falls back to `body`, then DIRT, when
+##                          a map predates the `bottom` field or leaves it unauthored)
+##
+## Returns a `TileTypes.Type` backing int. `TileTypes.DEFAULT_BODY` (DIRT) is the final
+## fallback so a malformed/legacy tile degrades to brown earth rather than crashing.
+static func face_type(tile: Dictionary, face: Face) -> int:
+	match face:
+		Face.TOP:
+			return tile.get("type", TileTypes.DEFAULT_BODY)
+		Face.BOTTOM:
+			# Unauthored undersides inherit the side (body) color — a plain dirt tile
+			# reads dirt underneath, a stone-sided tile reads stone — so the "wrong"
+			# underside (e.g. the meta-god reveal's pentagram) is authored, not default.
+			return tile.get("bottom", tile.get("body", TileTypes.DEFAULT_BODY))
+		_:
+			# NORTH/SOUTH/EAST/WEST all read the single body type today.
+			return tile.get("body", TileTypes.DEFAULT_BODY)
+
+
 ## Human-readable face name, for debug prints and (later) any HUD/telegraph text.
 static func display_name(face: Face) -> String:
 	match face:

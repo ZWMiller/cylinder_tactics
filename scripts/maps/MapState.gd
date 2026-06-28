@@ -32,4 +32,18 @@ extends Resource
 ## (cosmetic), letting a tile be e.g. stucco-sided with a slate-roof cap. A `TileTypes.Type`
 ## per entry. May be empty on maps saved before this field existed; `MapData.to_states`
 ## then fills in `TileTypes.DEFAULT_BODY` (brown dirt), so old maps look unchanged.
+##
+## NOTE (per-face terrain — see `TileFaces.face_type`): all four side faces
+## (N/S/E/W) share this one `bodies` value today. When sides become independently
+## typed, that is an *additive* change — new parallel arrays (`norths`/`souths`/…)
+## with the same "absent → fall back to `bodies`" rule — not a reshape of this format.
 @export var bodies: PackedInt32Array = PackedInt32Array()
+
+## Flat, row-major BOTTOM (underside) cap types parallel to `heights` — the color of
+## the tile's underside, which `Battlefield` draws as a separate cap so the map's bottom
+## can be authored independently of its top/sides (the underside of the world; see
+## docs/FACES.md and the meta-god reveal in docs/GAME_DESIGN.md §11). A `TileTypes.Type`
+## per entry. Same back-compat rule as `bodies`: empty on maps saved before this field
+## existed, in which case `MapData.to_states` falls back to the tile's body type, so an
+## old map's underside simply matches its sides and nothing changes visually.
+@export var bottoms: PackedInt32Array = PackedInt32Array()
