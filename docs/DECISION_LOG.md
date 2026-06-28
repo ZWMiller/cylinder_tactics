@@ -6,6 +6,107 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-28 — Move undo (anchor-based), + a reusable green heal float
+
+**Decision:** A player can take back **movement** (and reclaim the move slot(s) it spent) freely, up
+until they do something that changes the battle for anyone else. Implemented as an **undo anchor**:
+the unit's `(tile, actions-spent, HP)` snapshot, set at **turn start** and re-set immediately **after
+an attack/spell commits**. "Undo Move" is a permanent menu option that **greys out** (via
+`_is_action_enabled`, like Attack/Spell) until `_undo_available`; choosing it snaps the unit back to
+the anchor tile, refunds `_actions_taken` to the anchor count, and restores HP. So:
+move→move undoes to turn start (both moves back); attack→move undoes only the move (anchor sits just
+after the attack); the attack/spell itself is never undoable.
+
+**Why anchor-based (vs a full action history / command stack):** the rule is simply "rewind my own
+movement to the last point the board was unchanged for others," which is exactly one checkpoint — no
+need for a multi-level undo stack. Movement only ever affects the mover, so reverting position +
+refunding the slot is a complete, safe undo; an offensive action moves the checkpoint forward so it
+can't be crossed.
+
+**Edge cases handled:** (1) **in-flight walk** — undo `halt()`s the unit (new `Unit.halt`, which
+stops without emitting `move_finished`) before repositioning, so it doesn't keep gliding to the
+abandoned destination; (2) **on-enter hazard race** — a committed move spawns its lava tick as a
+fire-and-forget awaiting arrival, so undo bumps a `_move_token` that the tick re-checks and skips if
+it changed (the move was taken back); (3) **hazard already applied** — HP is restored from the anchor
+snapshot, refunding damage a move stepped into.
+
+**Menu note:** "Undo Move" is kept in the option list and greyed (rather than added/removed live)
+because rebuilding the menu mid-turn left the panel mis-sized — the menu is built once per turn and
+only re-greyed. "Stats" was pulled from the menu for now (hover still shows the stat panel); a better
+surfacing is TBD.
+
+**Heal float:** added `_spawn_heal_number` — a green **"+N"** counterpart to the red damage number,
+reusing the already-generic `FloatingCombatText.spawn` (no new effect). Undo fires it for the HP it
+refunds, and only when that refund is > 0 (no "+0" on a normal, no-hazard undo). General-purpose, so
+real healing later reuses it.
+
+---
+
+## 2026-06-28 — Wire terrain gameplay: Dijkstra movement, terrain-gated casting, dual-tick hazard, cosmetic liquid recess
+
+**Decision:** Consume the `TileTypes` property table in live play (the payoff of the two-layer-tile
+work). Four sub-systems, with these specific choices:
+
+- **Movement cost → Dijkstra (not BFS).** Per-tile `move_cost` (liquids = 2) makes step cost
+  variable, so a plain BFS no longer guarantees the first arrival to a tile is the cheapest.
+  `reachable_tiles`/`find_path` became a small linear-scan Dijkstra; `classify_path` accumulates the
+  entered-tile cost instead of using the path index as the cost. Chose linear-scan (no binary heap)
+  because maps are small and the reachable region is bounded by the move budget — clarity over a
+  speedup we don't need (per CLAUDE.md). Jump/solid/occupied rules are unchanged.
+
+- **Casting legality keys on the tile, decided in one place.** A spell is blocked when
+  `TileTypes.can_cast(caster's surface tile)` is false (liquids). Both the player's spell pick and
+  the enemy AI's attack choice consult one helper, `Main._can_cast_from`, so the rule can't drift.
+  Player feedback reuses the spell-menu toast (generalized `flash_insufficient` → `flash_warning`).
+
+- **Hazard (lava) ticks BOTH on-enter and at turn-start** (owner's call). On-enter gives immediate
+  "you stepped in lava" feedback (after the move *lands* — via `move_finished`), turn-start re-bites
+  a unit that *stays* in it (FFT poison-style). They don't double within one turn (turn-start fires
+  before the move; on-enter after). A lethal tick on the *active* unit can't go through `end_turn`
+  (which dereferences the unit it just freed) — added `TurnManager.notify_active_died` to advance
+  the scheduler cleanly. Hazard application is funneled through one async `_resolve_hazard`.
+
+- **Liquid depth is cosmetic-only.** A liquid surface is drawn recessed (`liquid_recess`) and the
+  unit sinks a bit further (`liquid_sink`, via a new `unit_stand_world` used for spawn + walk path),
+  so it reads as standing *in* water. Critically, **gameplay heights stay the integer rim** — a new
+  `_surface_world_y` handles the visual recess while jump/range/path math keeps using the integer
+  `tile_height`/`_height_units`. Chose this split so the look change can never silently alter which
+  steps are legal. Rejected recessing the height itself (would leak the cosmetic dip into jump math).
+
+**Why now / why this shape:** the table was authored to be the single source of truth; wiring it in
+play is what makes terrain *matter* before authoring real maps. Keeping the recess cosmetic and the
+casting rule single-seam follows the project's clarity-first, no-premature-abstraction stance.
+
+**Same session — cascading shift morph (not an instant snap).** A time-shift now plays a **diagonal
+cascade** from corner (0,0): each tile eases its own height + color over a few frames, staggered by
+`(x+z)`, without blocking its neighbours — the map "transforms step by step." Driven by a `_process`
+tick on `Battlefield` (idle otherwise via `set_process(false)`), reusing one extracted
+`_apply_tile_geometry` drawer for both the static render and the morph so they can't diverge.
+Decisions: (1) the **logical state advances immediately**, the cascade is cosmetic catch-up (input is
+gated during the cinematic anyway), and `Main` awaits a new `shift_animation_finished` signal
+(guarded by `is_shifting()` to dodge the already-finished race) before re-settling units; (2)
+**units are held constant and faded translucent** (`Unit.set_phased`) for the whole morph, then
+re-settled + fall-damaged in ONE pass at the end — chosen over having units *ride* the morphing
+ground (simpler, no per-frame unit/terrain coupling, and the phase-out reads as "out of time"); (3)
+cliffs morph too — each frame fills an interpolated height grid first so a tile's neighbour-aware
+column depth sees its neighbours' *animating* heights; (4) colors lerp on **per-tile** morph
+materials so morphing one tile never tints the shared per-type material. Frame-count feel is
+`@export`ed (`shift_frames_per_level` 5, `shift_cascade_frames` 4 — bumped from 2 so the wave clearly
+floods across small maps rather than far tiles starting as near ones finish, `shift_color_morph_frames` 8).
+
+**Same session — re-settle units + fall damage on a time-shift.** When the map shifts, every unit now
+re-settles onto its tile's NEW surface (it stays on the same (x, z); only the ground moved): a rise
+pops it up, a drop drops it, and a tile that just became liquid sinks it in — all via a vertical
+`move_along` slide to `unit_stand_world`. Two deliberate choices: (1) **`Main` coordinates it, not
+`Battlefield.advance_shift`** — the grid stays unit-agnostic (it doesn't know about units/occupancy),
+so `Main` snapshots heights before the shift and re-settles after, around the existing transition
+cinematic. (2) **Fall-damage formula = `fall_levels − jump`** (owner's call), zero unless the excess
+is ≥ 1 level, round-half-down. This replaces the earlier TODO idea of reading the reserved
+`temporal_resist` stat; jump-as-fall-absorption is simpler and ties the existing movement stat to the
+shift threat. `temporal_resist` stays reserved for a future, separate mitigation if wanted.
+
+---
+
 ## 2026-06-27 — Meta-god reveal: decay first, god revealed later (direction; build deferred)
 
 **Decision (direction + one lock):** Adopt a second signature idea — the game is secretly **meta**:

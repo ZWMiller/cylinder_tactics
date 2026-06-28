@@ -34,6 +34,7 @@ const UNIT_SCENE := preload("res://scenes/Unit.tscn")
 const _ACTION_MOVE := "Move"
 const _ACTION_ATTACK := "Attack"
 const _ACTION_SPELL := "Spell"
+const _ACTION_UNDO := "Undo Move"
 const _ACTION_STATS := "Stats"
 const _ACTION_END := "End Turn"
 
@@ -77,6 +78,10 @@ const DAMAGE_NUMBER_HEIGHT := 1.8
 
 ## Color of the floating damage number (a soft red so it reads as "ouch" against the terrain).
 const DAMAGE_NUMBER_COLOR := Color(1.0, 0.5, 0.45)
+
+## Color of the floating HEAL number — the green "+N" counterpart to the damage red (e.g. HP refunded
+## when a move is undone). Same float-up popup, opposite read.
+const HEAL_NUMBER_COLOR := Color(0.45, 1.0, 0.5)
 
 ## The input phases of a turn: choosing an action, browsing the spell submenu, placing a move, or
 ## aiming an attack. SPELL_MENU is a sub-state of the menu (the action menu stays visible beside it).
@@ -149,6 +154,22 @@ const MAX_ACTIONS_PER_TURN := 2
 ## move and attack commits. Drive which menu options are enabled.
 var _actions_taken: int = 0
 var _offensive_taken: bool = false
+
+## Move-undo state. The player may take back movement (and reclaim the move slots it spent) at any
+## point until it changes the battle for anyone else — i.e. as long as all they've done since the
+## "anchor" is move. The anchor is set at turn start and re-set immediately AFTER an attack/spell
+## (so an offensive action can never be undone, only moves made after it). Undo snaps the unit back to
+## the anchor tile, refunds `_actions_taken` to the anchor's count, and restores HP (in case a move
+## stepped onto a hazard). `_undo_available` gates the menu option.
+var _undo_available: bool = false
+var _undo_anchor: Vector2i = Vector2i.ZERO
+var _undo_anchor_actions: int = 0
+var _undo_anchor_hp: int = 0
+
+## Bumped on every committed player move (and on undo). The on-enter hazard coroutine
+## (`_apply_hazard_after_move`) captures the token at commit time and skips if it no longer matches —
+## so undoing a move cancels the lava tick it would otherwise have landed.
+var _move_token: int = 0
 
 ## The turn scheduler that decides whose turn it is (speed/CT order). Created in `_ready`,
 ## the same code-instantiated pattern as the HUD panels. The owner of turn state.
@@ -401,7 +422,12 @@ func _menu_options_for(unit: Unit) -> Array:
 	var options := [_ACTION_MOVE, _ACTION_ATTACK]
 	if unit.has_spells():
 		options.append(_ACTION_SPELL)
-	options.append(_ACTION_STATS)
+	# "Undo Move" is always listed but greys out (via `_is_action_enabled`) until there's movement to
+	# take back — the same stable-list + greying pattern as Attack/Spell, so the menu is built once
+	# per turn and never rebuilt (rebuilding mid-turn left the panel mis-sized).
+	options.append(_ACTION_UNDO)
+	# NOTE: "Stats" intentionally omitted for now (hover still shows the stat panel) — a better way to
+	# surface it is TBD.
 	options.append(_ACTION_END)
 	return options
 
@@ -416,8 +442,10 @@ func _is_action_enabled(action: String) -> bool:
 			return _actions_taken < MAX_ACTIONS_PER_TURN
 		_ACTION_ATTACK, _ACTION_SPELL:
 			return _actions_taken < MAX_ACTIONS_PER_TURN and not _offensive_taken
+		_ACTION_UNDO:
+			return _undo_available   # only choosable when there's movement to take back
 		_:
-			return true   # Stats / End Turn never count against the budget
+			return true   # End Turn never counts against the budget
 
 
 ## Push the current enabled/disabled state of every menu option to the HUD (greys what
@@ -455,6 +483,8 @@ func _activate_menu_option() -> void:
 			_enter_attack_phase(_active_unit.basic_attack())
 		_ACTION_SPELL:
 			_enter_spell_menu()
+		_ACTION_UNDO:
+			_undo_move()
 		_ACTION_STATS:
 			_inspect_active_unit()
 		_ACTION_END:
@@ -495,15 +525,27 @@ func _refresh_spell_menu() -> void:
 	_spell_menu.refresh(_spell_index, affordable)
 
 
-## Pick the highlighted spell: if the unit can afford it, enter the targeting phase with that
-## spell's `Attack` profile (MP is spent later, on commit); otherwise flash "Not Enough MP" and
-## stay in the submenu.
+## Pick the highlighted spell: if the unit can afford it AND can cast from where it stands, enter
+## the targeting phase with that spell's `Attack` profile (MP is spent later, on commit). Otherwise
+## flash the matching toast ("Not Enough MP" / "Can't Cast Here") and stay in the submenu. The
+## terrain check is what wires `TileTypes.can_cast` into play: a unit standing in a liquid can't cast.
 func _activate_spell_option() -> void:
 	var spell: Attack = _active_unit.known_spells[_spell_index]
 	if _active_unit.current_mp < spell.mp_cost:
 		_spell_menu.flash_insufficient()
 		return
+	if not _can_cast_from(_active_unit):
+		_spell_menu.flash_warning("Can't Cast Here")
+		return
 	_enter_attack_phase(spell)
+
+
+## Whether `unit` may cast a spell from the tile it currently stands on — false when that tile's
+## surface terrain is a liquid (water/lava/quicksand), per `TileTypes.can_cast`. The single seam
+## both the player's spell-pick and the enemy AI's attack choice consult, so casting legality is
+## decided in exactly one place.
+func _can_cast_from(unit: Unit) -> bool:
+	return TileTypes.can_cast(_battlefield.surface_type(unit.grid_coord.x, unit.grid_coord.y))
 
 
 ## Back out of the spell submenu to the parent action menu (Left/Esc): hide the submenu and return
@@ -631,8 +673,11 @@ func _commit_move(screen_point: Vector2) -> void:
 	if flags.has(false):
 		return
 
+	_move_token += 1   # new move: tag its on-enter hazard so an undo can cancel it
 	_perform_move(tile_path)
+	_apply_hazard_after_move(_active_unit, _move_token)   # tick lava etc. when the unit lands
 	_actions_taken += 1   # a committed move spends one of the turn's action slots
+	_undo_available = true   # this move (and any before it since the anchor) can now be taken back
 	# Back to the menu (so you can End Turn). The unit keeps walking meanwhile.
 	_start_turn()
 
@@ -646,6 +691,47 @@ func _perform_move(tile_path: Array) -> void:
 	_relocate_unit(_active_unit, tile_path.back())
 	_clear_plan()   # committed: drop waypoints and hide the path/range overlays
 	_active_unit.move_along(_battlefield.path_to_world_points(tile_path))
+
+
+# --- Move undo ---------------------------------------------------------------
+
+## Set the undo "anchor" to the active unit's current state — the point a later undo rewinds to.
+## Called at turn start and again right AFTER an attack/spell commits, so movement can always be taken
+## back to the anchor but the offensive action (which changed the battle for others) never can. Snaps
+## an immutable copy of the tile, the spent-action count, and HP (so a move onto a hazard can be
+## refunded). Clears `_undo_available` — there's nothing to undo until the unit moves again.
+func _set_undo_anchor() -> void:
+	if _active_unit == null:
+		return
+	_undo_anchor = _active_unit.grid_coord
+	_undo_anchor_actions = _actions_taken
+	_undo_anchor_hp = _active_unit.current_hp
+	_undo_available = false
+
+
+## Take back all movement since the anchor: snap the active unit back to the anchor tile, refund the
+## move action slot(s) it spent, and restore its HP (undoing any hazard a move stepped into — shown as
+## a green "+N" heal float). Cancels a still-pending on-enter hazard via the move token, and halts an
+## in-progress walk so it doesn't keep gliding to the now-undone destination. Only reverses this
+## unit's own movement — never an attack/spell (the anchor sits after those) and never anything that
+## touched another unit.
+func _undo_move() -> void:
+	if not _undo_available or _active_unit == null:
+		return
+	_move_token += 1   # invalidate the pending hazard for the move(s) we're taking back
+	if _active_unit.is_moving():
+		_active_unit.halt()   # stop the walk in place; we're about to reposition it
+	# Rewind position/occupancy to the anchor tile and refund the spent move slot(s).
+	_relocate_unit(_active_unit, _undo_anchor)
+	_active_unit.position = _battlefield.unit_stand_world(_undo_anchor.x, _undo_anchor.y)
+	_actions_taken = _undo_anchor_actions
+	# Restore HP and, if a move had actually taken some (e.g. lava), float the green "+N" refund.
+	var refunded := _undo_anchor_hp - _active_unit.current_hp
+	_active_unit.current_hp = _undo_anchor_hp
+	if refunded > 0:
+		_spawn_heal_number(_active_unit, refunded)
+	_undo_available = false
+	_start_turn()   # back to the menu — "Undo Move" is gone and Move is choosable again
 
 
 # --- Attack phase ------------------------------------------------------------
@@ -708,6 +794,7 @@ func _try_attack(screen_point: Vector2) -> void:
 	if target == null or target == _active_unit or target.allegiance == _active_unit.allegiance:
 		return
 	await _commit_attack(_active_unit, target, _attack_profile)
+	_set_undo_anchor()   # lock in the post-attack position; later moves undo back to here, not past it
 	_start_turn()   # back to the menu (Attack/Spell now greyed by the spent offensive action)
 
 
@@ -755,6 +842,14 @@ func _commit_attack(attacker: Unit, target: Unit, attack: Attack) -> void:
 func _spawn_damage_number(target: Unit, amount: int) -> void:
 	var head := target.global_position + Vector3.UP * DAMAGE_NUMBER_HEIGHT
 	FloatingCombatText.spawn(_battlefield, head, "-%d" % amount, DAMAGE_NUMBER_COLOR)
+
+
+## Pop a floating green "+N" heal number above `unit` — the positive counterpart to
+## `_spawn_damage_number`, for HP gained back (today: HP refunded by undoing a move that stepped onto
+## a hazard). Same self-freeing, rises-and-fades popup; the caller skips it when `amount` is 0.
+func _spawn_heal_number(unit: Unit, amount: int) -> void:
+	var head := unit.global_position + Vector3.UP * DAMAGE_NUMBER_HEIGHT
+	FloatingCombatText.spawn(_battlefield, head, "+%d" % amount, HEAL_NUMBER_COLOR)
 
 
 ## Play a unit's death animation, then remove it from the battle: free its tile, drop it from
@@ -840,8 +935,9 @@ func _start_turn() -> void:
 	_spell_menu.set_menu_visible(false)   # close any nested submenu when returning to the menu
 	_hovered_tile = Battlefield.INVALID_TILE
 	_menu.set_menu_visible(true)
-	# Grey out whatever the per-turn budget now forbids, and put the cursor on the first option that
-	# is still choosable (so it doesn't start on a just-greyed action after the unit acted).
+	# Grey out whatever the per-turn budget now forbids (this also flips "Undo Move" between
+	# enabled/greyed as movement becomes available or is used — no menu rebuild needed), and put the
+	# cursor on the first option that is still choosable (so it doesn't start on a just-greyed action).
 	_refresh_menu_enabled()
 	_menu_index = _first_enabled_index()
 	_menu.set_highlighted(_menu_index)
@@ -914,8 +1010,9 @@ func _spawn_recruit(x: int, z: int, side: Unit.Allegiance, recruit: Recruit) -> 
 	# enemies (and for a player whose recruit somehow has no stored loadout — they keep the default).
 	if side == Unit.Allegiance.PLAYER:
 		PartyLoadout.apply_to(unit, recruit)
-	# Initial placement is instant (set position directly); only later moves walk.
-	unit.position = _battlefield.tile_to_world(x, z)
+	# Initial placement is instant (set position directly); only later moves walk. Use the unit
+	# standing height (sunk into liquids) so a unit spawned on water reads as standing in it.
+	unit.position = _battlefield.unit_stand_world(x, z)
 
 	_units_by_tile[unit.grid_coord] = unit
 	_turn_manager.register(unit)
@@ -965,6 +1062,7 @@ func _on_active_unit_changed(unit: Unit) -> void:
 	# Fresh turn → fresh action budget (per-turn limit; see MAX_ACTIONS_PER_TURN).
 	_actions_taken = 0
 	_offensive_taken = false
+	_undo_available = false   # no movement to take back yet (anchor is set in _begin_turn)
 	_menu.set_title(unit.display_name())  # show whose turn it is
 	# Build the action menu for THIS unit (casters get "Spell"); the list can differ per unit, so
 	# rebuild on each hand-off rather than reusing a fixed set.
@@ -976,10 +1074,68 @@ func _on_active_unit_changed(unit: Unit) -> void:
 	if not _intro_zoom_done:
 		_intro_zoom_done = true
 		_camera.zoom_in_steps(INTRO_ZOOM_CLICKS)
+	# Hand off to the (async) turn-start path: it ticks any terrain hazard the unit is standing on
+	# BEFORE it acts, then opens the menu (player) or runs the AI (enemy) — unless the hazard just
+	# killed it, in which case the turn has already advanced.
+	_begin_turn(unit)
+
+
+## Run a unit's turn after the hand-off: apply the turn-start hazard tick, then — if the unit
+## survived — branch to the player menu or the enemy AI. Deferred one frame so the hazard work
+## (which may kill the unit and re-enter the turn manager) happens *after* the `active_unit_changed`
+## emission that started this, never inside it. If the hazard kills the unit, `_resolve_hazard` has
+## already advanced the turn, so we simply stop. Not awaited by the caller (fire-and-forget).
+func _begin_turn(unit: Unit) -> void:
+	await get_tree().process_frame
+	if _game_over or not is_instance_valid(unit):
+		return
+	await _resolve_hazard(unit)
+	# The hazard may have killed `unit` (turn already advanced) or the battle may have ended.
+	if _game_over or not is_instance_valid(unit) or not unit.is_alive():
+		return
 	if unit.allegiance == Unit.Allegiance.PLAYER:
+		_set_undo_anchor()   # turn-start anchor: undo rewinds movement back to here
 		_start_turn()
 	else:
 		_take_enemy_turn(unit)
+
+
+## Apply the hazard damage of the tile `unit` stands on (e.g. lava), if any. Awaitable so callers
+## can sequence around a possible death. Reads `TileTypes.hazard_damage` for the unit's current
+## surface tile; on a non-zero value it deals the damage, floats a "-N", and — if that was lethal —
+## plays out the death. The hazard victim is always the unit whose turn it is (ticked at turn start
+## or after its own move), so a death here means the *active* unit died mid-turn: after `_kill_unit`
+## cleans it off the board we tell the turn manager to advance (unless the death ended the battle).
+func _resolve_hazard(unit: Unit) -> void:
+	var dmg := TileTypes.hazard_damage(
+		_battlefield.surface_type(unit.grid_coord.x, unit.grid_coord.y))
+	if dmg <= 0:
+		return
+	var was_active := unit == _active_unit
+	unit.apply_damage(dmg)
+	_spawn_damage_number(unit, dmg)
+	if unit.is_alive():
+		return
+	await _kill_unit(unit)   # death animation + removal + battle-end check
+	# If the unit that just died was the active one and the battle is still going, the turn loop is
+	# now stalled on a freed active unit — nudge the scheduler to pick the next actor.
+	if was_active and not _game_over:
+		_turn_manager.notify_active_died()
+
+
+## Wait for `unit` to finish the walk it just started, then apply the hazard of the tile it landed
+## on (the "on enter" half of hazard damage — the turn-start half lives in `_begin_turn`). Fire-and-
+## forget: the player returns to its menu immediately after committing a move (the unit walks
+## meanwhile), so this rides alongside until arrival. `token` is the move's `_move_token` at commit;
+## if it no longer matches when the walk ends, the move was undone (or superseded) and we skip its
+## hazard. Also guards against the battle ending or the unit being freed before it lands.
+func _apply_hazard_after_move(unit: Unit, token: int) -> void:
+	await unit.move_finished
+	if token != _move_token:
+		return   # this move was taken back — don't land its hazard
+	if _game_over or not is_instance_valid(unit):
+		return
+	await _resolve_hazard(unit)
 
 
 ## Drive an enemy's turn with a simple offense AI, reusing the player's own action functions so the
@@ -1018,6 +1174,8 @@ func _take_enemy_turn(unit: Unit) -> void:
 
 	# 2) Move toward the prey, then try to strike from the new position.
 	await _enemy_move_toward(unit, prey, attack)
+	if not _enemy_can_continue(unit):
+		return   # a hazard (lava) killed it on arrival; the turn has already advanced
 	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
 	target = _enemy_target_in_range(unit, attack)
 	if target != null:
@@ -1027,15 +1185,29 @@ func _take_enemy_turn(unit: Unit) -> void:
 
 	# 3) Still out of range — spend the second action closing further, then end.
 	await _enemy_move_toward(unit, prey, attack)
+	if not _enemy_can_continue(unit):
+		return   # hazard death on the second move; turn already advanced
 	_turn_manager.end_turn()
 
 
+## Whether an enemy mid-turn should keep acting: false once the battle is over or the unit was freed
+## / died (e.g. it walked onto lava and the hazard killed it). When false the caller must return
+## WITHOUT calling `end_turn` — a hazard death has already advanced the turn via
+## `_resolve_hazard` → `notify_active_died`, so ending it again would double-advance.
+func _enemy_can_continue(unit: Unit) -> bool:
+	return not _game_over and is_instance_valid(unit) and unit.is_alive()
+
+
 ## The attack an enemy uses this turn: the first spell it can currently afford (offense prefers
-## magic), otherwise its basic weapon attack. Returns a fresh `Attack` (range band + anim + cost).
+## magic), otherwise its basic weapon attack. Spells are only considered when the enemy can actually
+## cast from where it stands (not while in a liquid) — the same `_can_cast_from` gate the player
+## obeys — so an enemy in water falls back to its weapon instead of picking an unusable spell.
+## Returns a fresh `Attack` (range band + anim + cost).
 func _enemy_choose_attack(unit: Unit) -> Attack:
-	for spell in unit.known_spells:
-		if unit.current_mp >= spell.mp_cost:
-			return spell
+	if _can_cast_from(unit):
+		for spell in unit.known_spells:
+			if unit.current_mp >= spell.mp_cost:
+				return spell
 	return unit.basic_attack()
 
 
@@ -1096,6 +1268,10 @@ func _enemy_move_toward(unit: Unit, prey: Unit, attack: Attack) -> void:
 	await get_tree().create_timer(ENEMY_TURN_DELAY).timeout
 	_perform_move(path)   # clears the overlays and starts the walk
 	await unit.move_finished
+	# On-enter hazard: stepping onto lava etc. ticks the moment the enemy lands. Resolved inline
+	# (not the player's fire-and-forget) so the turn flow can bail if it kills the mover; if it does,
+	# `_resolve_hazard` has already advanced the turn, and `_take_enemy_turn` guards on the return.
+	await _resolve_hazard(unit)
 
 
 ## Pick where an enemy should move from the reachable set (`_reachable`, just computed by
@@ -1161,8 +1337,17 @@ func _play_map_transition() -> void:
 	await _camera.zoom_to(_camera.home_ortho_size(), MAP_ZOOM_TIME)
 	await get_tree().create_timer(MAP_TRANSITION_HOLD).timeout
 
-	# The shift itself (terrain only today; unit re-settle + fall damage is a separate TODO).
-	_battlefield.advance_shift()
+	# The shift itself. Snapshot each unit's tile height BEFORE the terrain changes (the old level is
+	# gone once we advance), then phase the units translucent and hold them constant while the terrain
+	# morphs — the cascade sweeps the map tile by tile. Only AFTER the wave finishes do we resolve the
+	# units in one pass: snap each back to solid, re-settle onto its tile's new surface (a fall or a
+	# pop-up), and apply fall damage to anyone who dropped past their jump.
+	var pre_heights := _capture_unit_heights()
+	_set_units_phased(true)
+	_battlefield.advance_shift()             # kicks off the cascade morph (returns immediately)
+	if _battlefield.is_shifting():           # guard the race: a no-op shift finishes synchronously
+		await _battlefield.shift_animation_finished
+	await _resettle_units_after_shift(pre_heights)
 	await get_tree().create_timer(MAP_TRANSITION_HOLD).timeout
 
 	# Release the camera so the per-frame follow re-centers on the active unit, and zoom back
@@ -1171,6 +1356,72 @@ func _play_map_transition() -> void:
 	await _camera.zoom_to(restore_zoom, MAP_ZOOM_TIME)
 	# Refresh the countdown to the full cadence now that the shift has happened.
 	_shift_counter.set_count(_turn_manager.turns_until_transition())
+
+
+## Fade every unit translucent (`active` true) or back to solid (false) — the "phasing out of time"
+## cue while the map shifts around them. A thin wrapper so the transition reads as one call; each unit
+## owns the actual material toggle (`Unit.set_phased`).
+func _set_units_phased(active: bool) -> void:
+	for unit in _units_by_tile.values():
+		unit.set_phased(active)
+
+
+## Snapshot every unit's current tile height LEVEL, keyed by unit — taken just BEFORE a shift so the
+## re-settle can measure how far each unit's ground moved. Levels (not world units) so it compares
+## directly against the `jump` stat in `_fall_damage`.
+func _capture_unit_heights() -> Dictionary:
+	var heights := {}
+	for unit in _units_by_tile.values():
+		heights[unit] = _battlefield.height_level(unit.grid_coord.x, unit.grid_coord.y)
+	return heights
+
+
+## After a time-shift moved the terrain, settle every unit onto its tile's NEW surface and apply fall
+## damage. Each unit stays on the same (x, z) — only the ground under it rose or sank — so we slide it
+## from where it stands to the tile's new standing height (`unit_stand_world`, which also sinks it
+## into a tile that just became liquid): a rise reads as a "pop-up", a drop as a fall. A unit that
+## fell farther than its `jump` can absorb takes fall damage (`_fall_damage`); a lethal fall is killed
+## after the slides start. `pre_heights` is the pre-shift snapshot from `_capture_unit_heights`.
+##
+## Awaited by the cinematic so a death's animation finishes before the camera zooms back in. The
+## vertical slides themselves are NOT awaited — they play during the post-shift hold. Note the
+## occupancy map isn't re-keyed: a unit's (x, z) is unchanged by a height-only shift.
+func _resettle_units_after_shift(pre_heights: Dictionary) -> void:
+	_set_units_phased(false)   # the wave is done — snap everyone back to solid before they re-settle
+	var casualties: Array[Unit] = []
+	for unit in _units_by_tile.values():
+		var gx: int = unit.grid_coord.x
+		var gz: int = unit.grid_coord.y
+		# Slide to the new standing spot (same XZ, new Y) — the fall or pop-up animation. The point
+		# list must be typed `Array[Vector3]` (what `move_along` stores), so build it explicitly
+		# rather than passing an untyped `[...]` literal.
+		var settle: Array[Vector3] = [_battlefield.unit_stand_world(gx, gz)]
+		unit.move_along(settle)
+		if not pre_heights.has(unit):
+			continue   # spawned after the snapshot (can't happen today) — nothing to compare
+		var fall_levels: int = pre_heights[unit] - _battlefield.height_level(gx, gz)
+		var dmg := _fall_damage(fall_levels, unit.max_stats.jump)
+		if dmg > 0:
+			unit.apply_damage(dmg)
+			_spawn_damage_number(unit, dmg)
+			if not unit.is_alive():
+				casualties.append(unit)
+	# Play out any fatal falls (awaited) once all the slides have been kicked off.
+	for unit in casualties:
+		await _kill_unit(unit)
+
+
+## Fall damage for dropping `fall_levels` height-levels with a `jump` stat of `jump` (both in the
+## same integer level units). A unit absorbs falls up to its jump for free; only the EXCESS hurts:
+## `damage = fall_levels - jump`, but zero unless that excess is at least a full level (a drop within
+## one jump never hurts). The "round-half-down" (`ceil(x - 0.5)`) is a no-op on today's integer
+## heights but keeps the rule well-defined if heights ever go fractional. Per the owner's formula
+## (jump-based), chosen over the older `temporal_resist`-based idea in the TODO.
+func _fall_damage(fall_levels: int, jump: int) -> int:
+	var excess := float(fall_levels - jump)
+	if excess < 1.0:
+		return 0   # fell within your jump (or rose) — no damage; sub-1-level excess rounds to 0
+	return int(ceil(excess - 0.5))   # round half DOWN (2.5 -> 2)
 
 
 ## Update the top-right countdown box when the turn manager reports turns-until-shift.

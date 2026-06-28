@@ -87,6 +87,13 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
       nothing. `Main._actions_taken`/`_offensive_taken` (reset per turn) + `_is_action_enabled`
       drive both the menu greying (`ActionMenu.set_enabled`) and activation refusal. See
       `docs/DECISION_LOG.md`.
+- [x] **Move undo** — a player can take back movement (and reclaim the move slot) until they do
+      something that changes the battle for others. Anchor-based (`_set_undo_anchor` at turn start +
+      after an attack/spell; `_undo_move` rewinds tile/actions/HP to it); "Undo Move" is a permanent
+      menu option that greys out until a move is available (built once per turn — rebuilding mid-turn
+      mis-sized the panel). Halts an in-flight walk, cancels a pending on-enter hazard via a move
+      token, and floats a green "+N" (`_spawn_heal_number`, reusing `FloatingCombatText`) for any HP
+      refunded. ("Stats" pulled from the menu for now; hover still works.) See `docs/DECISION_LOG.md`.
 
 - [x] **Pre-battle loadout menu** — split into two scenes: `Loadout.tscn` (now the `run/main_scene`)
       runs before `Main.tscn`. Top third = active character portrait frame + full stat grid with live
@@ -143,11 +150,25 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       Tiles are now **two-layer** — a surface/cap `type` (gameplay + top color) plus a `body`
       type (side color, defaults `DIRT`), so one tile can be a stucco building with a slate
       roof. `MapState` gained a `bodies` array; `Battlefield` colors the column by body.
-- [ ] **Wire terrain gameplay** — read the table above in play: per-type **movement cost**
-      into `reachable_tiles`/`find_path`/`classify_path`; **casting legality** (`can_cast`,
-      no cast while standing in liquid) into the attack/spell phase; **hazard_damage** (lava)
-      on enter/turn; and **liquid depth** — recess a liquid tile's surface and sink the
-      cylinder *into* it so it reads as standing in water, not on it.
+- [x] **Wire terrain gameplay** — the `TileTypes` property table now drives play:
+      - **Movement cost:** `reachable_tiles`/`find_path` went BFS → **Dijkstra** (variable per-tile
+        `move_cost` — liquids cost 2 to enter — breaks BFS's "first arrival is cheapest"), and
+        `classify_path` accumulates entered-tile cost instead of using the path index. Jump/solid/
+        occupied rules unchanged.
+      - **Casting legality:** spells are gated by `TileTypes.can_cast` of the caster's tile via
+        `Main._can_cast_from` — the player's spell pick flashes a **"Can't Cast Here"** toast
+        (`SpellMenu.flash_warning`, generalized from `flash_insufficient`) and the enemy AI
+        (`_enemy_choose_attack`) falls back to its weapon when standing in liquid.
+      - **Hazard damage (lava):** ticks **both** on-enter (after a move lands —
+        `_apply_hazard_after_move` for the player, inline in `_enemy_move_toward` for the AI) **and**
+        at **turn start** (`_begin_turn`, deferred a frame past the hand-off). `_resolve_hazard` deals
+        the damage + floats a "-N"; a lethal tick on the active unit advances the turn via new
+        `TurnManager.notify_active_died` (can't reuse `end_turn` — it'd deref the freed unit).
+      - **Liquid depth:** a liquid tile's surface is drawn recessed (`Battlefield.liquid_recess`) and
+        a unit standing on it sinks a further `liquid_sink` (`unit_stand_world`, used for spawn +
+        walk path), so it reads as standing *in* water. Gameplay heights stay integer — the recess is
+        cosmetic only (new `_surface_world_y`; jump/range math untouched).
+      Verified: headless parse + full editor import clean.
 - [ ] **Line-of-sight + projectile collision** — tall terrain blocks arrows/fireballs and
       targeting (a grid/height LoS check between attacker and target; projectiles respect it).
       Most novel/complex; its own chunk.
@@ -221,8 +242,13 @@ between-battles loop, and only **then** open the big game-flow discussion. Don't
       enemy-specific. Added `Battlefield.find_path` (legal BFS route for the AI),
       `Unit.move_finished`, and a `CameraController.focus_on` slew that follows the active
       unit. See `docs/DECISION_LOG.md`.
-- [ ] Re-settle units + apply fall damage inside `advance_shift()` (terrain-only today) —
-      fall damage should read `max_stats.temporal_resist` (the reserved hook), not a global
+- [x] **Re-settle units + apply fall damage on a time-shift** — coordinated by `Main` around the
+      shift (not inside `advance_shift`, which stays unit-agnostic): `_capture_unit_heights` snapshots
+      each unit's tile level *before* the terrain moves, then `_resettle_units_after_shift` slides
+      every unit onto its tile's new surface (`unit_stand_world` — a rise "pops up", a drop "falls",
+      and a tile that just became liquid sinks the unit in). Fall damage (`_fall_damage`) = `fall_levels
+      − jump`, zero unless the excess is ≥ 1 level, round-half-down; a lethal fall is killed mid-
+      cinematic. Owner's jump-based formula was chosen over the older `temporal_resist` idea noted here.
 - [ ] Promotion / job-upgrade tree — a separate resource (which class unlocks which, at
       what level); deliberately kept out of `ClassDef`. See `docs/STATS.md`.
 
@@ -324,9 +350,9 @@ The move to **node composition + signals** as the battle architecture landed wit
 - [x] Basic combat (attack range, damage) — melee first pass done (see "Done" above); ranged +
       magic are the "Next up" items.
 - [ ] Character classes (soldier/archer/mage) + class-driven stat blocks — see `docs/GAME_DESIGN.md` §2–3
-- [~] Time-degradation map shift every N turns — *trigger + cadence + cinematic done*
-      (turn-counted in `TurnManager`, cinematic in `Main`); **still TODO: units fall + take
-      damage** on the shift (see the "Re-settle units + apply fall damage" item above). §4
+- [x] Time-degradation map shift every N turns — trigger + cadence + cinematic (turn-counted in
+      `TurnManager`, cinematic in `Main`) **and** units now re-settle + take fall damage on the shift
+      (see the "Re-settle units + apply fall damage" item above). §4
 - [~] Shift telegraph + hold-to-preview "what-if" view — *basic telegraph done* (the
       `ShiftCounter` countdown); **still TODO: the hold-to-preview "what-if" terrain view**
       (`Battlefield.peek_next_state` already exposes the data). See `docs/GAME_DESIGN.md` §4

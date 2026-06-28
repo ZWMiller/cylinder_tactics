@@ -227,6 +227,16 @@ func is_moving() -> bool:
 	return _is_moving
 
 
+## Stop an in-progress walk immediately, wherever the unit currently is — drop the remaining route and
+## go idle. Used when a move is UNDONE: the caller then repositions the unit to its pre-move tile.
+## Deliberately does NOT emit `move_finished` (no arrival happened); the move-undo path invalidates any
+## pending on-enter hazard via its own token instead, so a stale awaiter can't act on this halt.
+func halt() -> void:
+	_move_queue.clear()
+	_is_moving = false
+	set_process(false)
+
+
 ## Godot lifecycle hook: runs every frame, but only while a walk is active (we
 ## toggle it off when idle). Advances toward the next queued point at a constant
 ## speed; on arrival, pops it and aims at the next. `move_toward` clamps exactly to
@@ -785,6 +795,27 @@ func play_death_animation() -> void:
 
 
 # --- Appearance --------------------------------------------------------------
+
+## How solid a unit looks while "phased" — its alpha during a map time-shift. Low enough to read as
+## ghostly/out-of-time, high enough to still see who's who.
+const _PHASE_ALPHA := 0.3
+
+## Fade this unit to translucent (`active` true) or back to fully solid (false). Purely cosmetic: used
+## to "phase out" units while the map time-shifts around them — they hold position during the shift
+## cascade and snap back solid when it resolves. Toggles the body + hat materials (the same
+## per-instance materials the death fade uses): alpha-blend + `_PHASE_ALPHA` while phased, back to
+## opaque (alpha 1, `TRANSPARENCY_DISABLED`) when it ends. Instant; the caller owns any easing.
+func set_phased(active: bool) -> void:
+	for mat: StandardMaterial3D in [_body.material_override, _hat.material_override]:
+		if mat == null:
+			continue
+		if active:
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			mat.albedo_color.a = _PHASE_ALPHA
+		else:
+			mat.albedo_color.a = 1.0
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+
 
 ## Apply allegiance (body color) and class (hat shape + color) to the meshes.
 ## Central so both `_ready` and `configure` share exactly one code path.

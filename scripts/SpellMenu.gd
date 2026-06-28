@@ -193,10 +193,18 @@ func open_beside(anchor_rect: Rect2) -> void:
 	set_menu_visible(true)
 
 
-## Flash the "Not Enough MP" toast just to the right of the submenu: pop it to full opacity, hold,
-## then fade over `_WARN_FADE` (total ≈ `_WARN_SECONDS`). Re-triggering kills the prior fade so the
-## timer restarts cleanly instead of two tweens fighting.
+## Flash the "Not Enough MP" toast — the original, named entry point, now a thin wrapper over the
+## general `flash_warning` so existing callers read unchanged.
 func flash_insufficient() -> void:
+	flash_warning("Not Enough MP")
+
+
+## Flash `text` as a transient warning toast just to the right of the submenu: pop it to full
+## opacity, hold, then fade over `_WARN_FADE` (total ≈ `_WARN_SECONDS`). Re-triggering kills the
+## prior fade so the timer restarts cleanly instead of two tweens fighting. Used for "Not Enough MP"
+## and "Can't Cast Here" (casting blocked by the terrain a unit stands on).
+func flash_warning(text: String) -> void:
+	_warn.text = text
 	if _warn_tween != null and _warn_tween.is_valid():
 		_warn_tween.kill()
 	# Park it beside this submenu using the panel's current rect (valid — the menu is open).

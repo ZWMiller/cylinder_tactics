@@ -31,6 +31,12 @@ const _ITEM_SEPARATION := 14     ## Vertical gap between options.
 const _CORNER_RADIUS := 8        ## Slightly rounded corners, so it sits less starkly.
 const _SCREEN_MARGIN := 24       ## Gap from the bottom-left screen corner.
 
+## Floor on the option list's width (px). Belt-and-suspenders against container auto-size flakiness:
+## the labels also get their text at build time (so width is computed up front, even while the menu
+## is hidden during an enemy turn), but this guarantees a sane width regardless. Matches the
+## SpellMenu's `_LIST_MIN_WIDTH` approach.
+const _MIN_LIST_WIDTH := 340
+
 ## Color of the title (active unit's name) — brighter than the options so it reads as
 ## a heading, not another selectable row.
 const _TITLE_COLOR := Color(0.95, 0.95, 1.0)
@@ -104,6 +110,7 @@ func _ready() -> void:
 
 	_list = VBoxContainer.new()
 	_list.add_theme_constant_override("separation", _ITEM_SEPARATION)
+	_list.custom_minimum_size.x = _MIN_LIST_WIDTH   # never narrower than this, so text can't overflow
 	_list.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	content.add_child(_list)
 
@@ -119,6 +126,11 @@ func build(options: Array) -> void:
 		var label := Label.new()
 		label.add_theme_font_size_override("font_size", _FONT_SIZE)
 		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		# Give the label its (unselected-format) text NOW so the container computes a correct width up
+		# front — even while the menu is hidden (e.g. rebuilt during an enemy turn). `_render` later
+		# only swaps the prefix/color. Without this the labels start empty (~0 width) and the panel can
+		# settle too narrow, overflowing the text. Height was never affected (line-height is constant).
+		label.text = "   " + str(option)
 		_list.add_child(label)
 		_labels.append(label)
 	# A fresh menu starts with everything enabled until `set_enabled` says otherwise.

@@ -87,6 +87,17 @@ func active() -> Unit:
 	return _active_unit
 
 
+## The active unit died *during its own turn* (e.g. it stepped onto lava, or a turn-start hazard
+## tick killed it) — advance to the next actor without trying to bank its charge or count the turn.
+## `Main` calls this AFTER it has already `unregister`ed and freed the unit, so we must not touch it
+## here: we just clear the now-dangling active pointer and pick the next. (The normal `end_turn`
+## path can't be reused — it dereferences `_active_unit` to subtract CT, which would hit a freed
+## node — and a death isn't a "completed turn", so it shouldn't tick the map-shift counter.)
+func notify_active_died() -> void:
+	_active_unit = null
+	_advance_to_next_actor()
+
+
 ## Configure how many character turns pass before the map takes its turn (a time-shift). Each
 ## map sets its own pace by calling this during setup; left alone it uses
 ## `DEFAULT_MAP_TRANSITION_SPEED` (10). A value <= 0 disables automatic shifts. Resets the

@@ -47,7 +47,13 @@ an object except `Battlefield`, which is a `Node3D` in `scenes/Main.tscn`.
   24×24), *not* at the origin.
 
 Helpers `tile_to_world(x, z)` and `tile_height(x, z)` convert grid → world and are the
-seed of the future shared coordinate-helper module (movement / LoS / combat).
+seed of the future shared coordinate-helper module (movement / LoS / combat). Two
+companions split out the **liquid sink-in** (cosmetic): `tile_to_world` returns the
+*visible* surface (recessed on liquids, via `_surface_world_y`), while `unit_stand_world`
+drops a unit a further `liquid_sink` so it stands *in* water — used for spawn placement and
+the walk path. `tile_height` stays the **integer rim** and is what jump/range/path math
+uses, so the recess never changes which steps are legal. `surface_type(x, z)` is the
+gameplay-type accessor `Main` reads for move cost / casting / hazard.
 
 ## Rendering (geometry only — no textures)
 
@@ -77,6 +83,12 @@ other body types get a cached per-type material (same cache as the caps). One sh
 per-instance scale/`material_override` keeps the tile pieces cheap. A tile of height `H`
 rises `H * height_step` world units.
 
+**Liquids read as a basin.** A liquid surface (`TileTypes.is_liquid`) is drawn recessed by
+`liquid_recess` below its integer rim (`_surface_world_y`), and the click box follows the
+visible top — so water/lava/quicksand dips below its neighbours. This is purely cosmetic:
+only the *drawn* top and things sitting on it move; the gameplay height (cliffs, jump, range)
+stays the integer rim.
+
 ## Shift API (intentionally small and public)
 
 So the future hold-to-preview view and the time-mage's powers can peek at / nudge the
@@ -85,23 +97,53 @@ shift without reaching into internals:
 - `current_state()` — the state on screen now.
 - `next_state_index()` / `peek_next_state()` — what the next shift will show (this is
   what preview will read), without applying it.
-- `advance_shift()` — move to the next state (wrapping) and redraw. *Later* this will
-  also re-settle units and apply fall damage; today it only changes terrain.
+- `advance_shift()` — move to the next state (wrapping) and play the **cascade morph** into
+  it (below). The *logical* state advances immediately (picking, `current_state`, and Main's
+  re-settle all read the new terrain at once — input is gated during the cinematic); the
+  cascade is a purely visual catch-up.
+- `is_shifting()` / `shift_animation_finished` — whether the cascade is still playing, and a
+  signal when it completes. `Main` checks the former before `await`ing the latter (race-free)
+  so it re-settles units only after the wave finishes.
+
+### The cascade morph (a shift doesn't snap)
+
+Instead of the whole map snapping to the new state, `advance_shift` sweeps a **diagonal
+wavefront** out from corner `(0,0)`: tile `(x,z)` starts morphing at frame
+`(x+z) * shift_cascade_frames` and eases its **own** height + color over a few frames
+**without waiting for its neighbours**, so the map looks like it transforms step by step
+(`_begin_shift_animation` schedules per-tile start/duration; `_process` ticks it; a duration
+is paced by `shift_frames_per_level` per height level, with a `shift_color_morph_frames` floor
+when only the color changes). Each frame fills an interpolated **height grid** first, then
+re-draws every tile through the shared `_apply_tile_geometry` — so a tile's neighbour-aware
+column depth reads its neighbours' *animating* heights and the cliffs grow/shrink smoothly too.
+Colors lerp on **per-tile morph materials** (so morphing one tile never tints the shared
+per-type material); when the wave finishes, a final `render_state` swaps the shared materials
+back in. Tunables are `@export`ed (`shift_frames_per_level`, `shift_cascade_frames`,
+`shift_color_morph_frames`). **Units are held constant** (and `Main` fades them translucent via
+`Unit.set_phased`) for the whole cascade, then re-settled + fall-damaged in one pass after it
+ends — they don't ride the morphing ground.
 
 ## Movement: reachability, legality & overlays
 
 The grid owns movement math (it's the coordinate/occupancy authority); `Main` only
 snapshots constraints and renders. Heights compare in raw integer *levels* (same units
-as a unit's `jump` stat), and each orthogonal step costs 1 `move` point.
+as a unit's `jump` stat). The cost to **enter** a tile is its surface type's
+`TileTypes.move_cost` (1 for most ground, **2 for liquids**) — *not* a flat 1 per step —
+so wading costs more `move` than walking.
 
-- `reachable_tiles(start, move, jump, solid, occupied)` — uniform-cost BFS of every tile
-  the unit can reach **and stop on**. A step needs `|Δheight| ≤ jump` and a non-`solid`
-  neighbour; `occupied` tiles (any unit) are walked *through* but excluded from the
-  result. `solid` = enemy tiles (impassable); `occupied` = all units (can't stop on).
+- `reachable_tiles(start, move, jump, solid, occupied)` — **Dijkstra** (cheapest-first) of
+  every tile the unit can reach **and stop on**. A step needs `|Δheight| ≤ jump`, a
+  non-`solid` neighbour, and enough budget to pay the neighbour's `move_cost`; `occupied`
+  tiles (any unit) are walked *through* but excluded from the result. `solid` = enemy tiles
+  (impassable); `occupied` = all units (can't stop on). It's Dijkstra, not BFS, precisely
+  because variable step cost means the first arrival at a tile isn't necessarily cheapest.
+- `find_path(start, dest, …)` — same Dijkstra with parent links, returning the cheapest
+  legal step-path (the enemy AI's route).
 - `classify_path(tiles, move, jump, solid, occupied)` — per-tile blue/red legality for a
-  concrete expanded path (over-budget / jump-too-tall / into `solid` / final tile
-  `occupied` → illegal, and everything after a failure too). Drives both the preview and
-  the commit gate (any `false` ⇒ move refused).
+  concrete expanded path, accumulating each entered tile's `move_cost` against the budget
+  (over-budget / jump-too-tall / into `solid` / final tile `occupied` → illegal, and
+  everything after a failure too). Drives both the preview and the commit gate (any
+  `false` ⇒ move refused).
 - `show_move_range(reachable)` / `clear_move_range()` — draws the reachable region as a
   black **outline**: horizontal top-lines on edges facing outside the region, plus thin
   vertical **corner posts** wherever the outline steps between heights (so it follows
@@ -137,7 +179,8 @@ parallel arrays, not a reshape.
 ## Configuration
 
 Inspector-exported on the `Battlefield` node: `map_data` (optional `MapData` to load),
-`grid_width`, `grid_height`, `tile_size`, `height_step`, `cap_thickness`.
+`grid_width`, `grid_height`, `tile_size`, `height_step`, `cap_thickness`, `min_body_depth`,
+and the liquid sink-in tuning `liquid_recess` / `liquid_sink`.
 
 **Maps are variable-size.** The map source is resolved in `_ready()` in priority order:
 an assigned **`map_data`** resource → a directly-assigned **`states`** array → the

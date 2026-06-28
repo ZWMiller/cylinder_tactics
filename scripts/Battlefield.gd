@@ -82,6 +82,41 @@ const _ORTHO_DIRS := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(
 ## sets the floor for the no-cliff case. Bump it for chunkier slabs.
 @export var min_body_depth: int = 1
 
+## How far (world units) a LIQUID tile's surface is drawn BELOW its solid rim height, so water/
+## lava/quicksand reads as a shallow basin rather than a flat-topped block. Purely cosmetic: the
+## tile's gameplay height (used for jump/range/path math) stays the integer value — only the drawn
+## cap and the things that sit ON the surface (markers, a standing unit) drop by this much. Kept
+## well under `height_step` so the recess is a dip, not a full level.
+@export var liquid_recess: float = 0.15
+
+## Extra depth (world units) a UNIT sinks below a liquid tile's (already-recessed) surface, so the
+## cylinder stands *in* the water instead of on top of it. Added on top of `liquid_recess` for the
+## unit only — the surface markers stay at the water line. See `unit_stand_world`.
+@export var liquid_sink: float = 0.22
+
+# --- Time-shift cascade animation (see _begin_shift_animation) ----------------
+# A shift no longer snaps the whole map at once; it sweeps a diagonal wave from corner (0,0), each
+# tile morphing its OWN height + color over a few frames without waiting for its neighbours — so the
+# map looks like it's transforming step by step. Units are held CONSTANT (and Main fades them
+# translucent) through the whole cascade and resolved in one pass after it finishes (re-settle +
+# fall damage then). These tune the feel (frame counts at a nominal 60fps).
+
+## Frames a single tile takes to change ONE height level — the morph *rate*. A tile that moves N
+## levels animates over `N * shift_frames_per_level` frames, so bigger changes take longer.
+@export var shift_frames_per_level: float = 5.0
+
+## Frames of delay added per diagonal step out from the start corner — the cascade *stagger*. Tile
+## (x, z) begins its morph at `(x + z) * shift_cascade_frames`, so the wavefront flows across the map.
+## Smaller = a tighter, faster sweep; larger = a slower, more drawn-out wave. This wants to be a fair
+## bit larger than a single tile's morph time so the change clearly "floods" across rather than the
+## far tiles starting as the near ones finish — which reads worst on SMALL maps (few diagonals, so a
+## small total spread). Bumped from an initial 2.0 for exactly that.
+@export var shift_cascade_frames: float = 4.0
+
+## Minimum frames a tile's color morph takes when ONLY its type changed (no height move to pace it),
+## so a recolor still eases in rather than snapping.
+@export var shift_color_morph_frames: float = 8.0
+
 # --- Runtime state -----------------------------------------------------------
 
 ## The ordered list of time-states. Leave empty to use the built-in DemoMap, or
@@ -90,6 +125,37 @@ var states: Array = []
 
 ## Index into `states` of the state currently being displayed.
 var _current_index: int = 0
+
+# --- Time-shift cascade runtime (set up in _begin_shift_animation, ticked in _process) ----
+
+## Fired when a shift's cascade morph has fully played out and the map is rendered in its new state.
+## `Main` awaits this during the transition cinematic so the unit re-settle + fall damage happen only
+## after the wave has finished (and so it can hold on the finished map before zooming back in).
+signal shift_animation_finished
+
+## True while a cascade morph is playing. Gates `_process` and answers `is_shifting()` (the race-free
+## check `Main` uses before awaiting `shift_animation_finished`).
+var _shift_active: bool = false
+
+## The state we are morphing FROM and TO. `_shift_to` is also the now-current state (the logical shift
+## already happened; the cascade is the visual catch-up). Held so each frame can interpolate between
+## them per tile.
+var _shift_from: Array = []
+var _shift_to: Array = []
+
+## Frames elapsed since the cascade began (accumulated as `delta * 60`, a nominal-60fps frame count),
+## and the total frames until every tile has finished (max tile `start + duration`).
+var _shift_elapsed: float = 0.0
+var _shift_total: float = 0.0
+
+## Per-tile cascade schedule, indexed `[x][z]`: the frame each tile BEGINS morphing (its wavefront
+## delay) and how many frames its morph lasts (paced by height change / color change).
+var _shift_start: Array = []
+var _shift_dur: Array = []
+
+## Scratch per-frame grid of each tile's interpolated height LEVEL (float), filled before drawing so a
+## tile's neighbour-aware column depth reads the neighbours' *animating* heights (cliffs morph too).
+var _anim_level: Array = []
 
 ## A single 1x1x1 box mesh shared by every tile instance. We never resize the
 ## mesh itself — each tile's MeshInstance3D is *scaled* to the size it needs.
@@ -241,6 +307,9 @@ func _ready() -> void:
 	_build_tiles()
 	render_state(_current_index)
 
+	# `_process` only does work mid-shift (the cascade morph). Stay idle until `advance_shift` arms it.
+	set_process(false)
+
 
 # --- Public shift API (see docs/GAME_DESIGN.md §4 / DECISION_LOG) -------------
 # Kept deliberately small and public so the preview feature and the time-mage's
@@ -262,29 +331,219 @@ func peek_next_state() -> Array:
 	return states[next_state_index()]
 
 
-## Advance the time-shift by one step: move to the next state (wrapping) and
-## redraw. Later this will also re-settle units and apply fall damage; for now it
-## only changes the terrain.
+## Advance the time-shift by one step: move to the next state (wrapping) and play the cascade morph
+## into it. The logical state advances immediately (so `current_state` / picking / `Main`'s re-settle
+## all read the NEW terrain right away — input is gated during the cinematic anyway); the cascade is a
+## purely visual catch-up that sweeps across the tiles over the next frames. Terrain only — this node
+## stays unit-agnostic. Re-settling units onto the new heights and applying fall damage is coordinated
+## by `Main` AFTER the cascade finishes (it awaits `shift_animation_finished`), via
+## `_capture_unit_heights` / `_resettle_units_after_shift`.
 func advance_shift() -> void:
+	var from_state: Array = states[_current_index]
 	_current_index = next_state_index()
+	print("Battlefield: shifting to time-state %d / %d" % [_current_index + 1, states.size()])
+	_begin_shift_animation(from_state, states[_current_index])
+
+
+## Whether a cascade morph is currently playing. `Main` checks this before awaiting
+## `shift_animation_finished` so it never blocks forever on a wave that already finished (e.g. a
+## no-op shift that completed synchronously).
+func is_shifting() -> bool:
+	return _shift_active
+
+
+## Set up the cascade that morphs every tile from `from_state` to `to_state`. Computes each tile's
+## start frame (a diagonal wavefront out from corner (0,0)) and morph duration (paced by how many
+## height levels it moves, with a floor when only its color changes), then arms `_process` to tick it.
+## A shift where nothing actually changes finishes immediately (no wave to play).
+func _begin_shift_animation(from_state: Array, to_state: Array) -> void:
+	_shift_from = from_state
+	_shift_to = to_state
+	_shift_elapsed = 0.0
+	_shift_total = 0.0
+	_shift_start = []
+	_shift_dur = []
+	_anim_level = []
+	for x in grid_width:
+		var start_col: Array = []
+		var dur_col: Array = []
+		var level_col: Array = []
+		for z in grid_height:
+			var from_tile: Dictionary = from_state[x][z]
+			var to_tile: Dictionary = to_state[x][z]
+			var dh: int = abs(to_tile["height"] - from_tile["height"])
+			var dur: float = dh * shift_frames_per_level
+			if _tile_color_changes(from_tile, to_tile):
+				dur = maxf(dur, shift_color_morph_frames)
+			var start: float = (x + z) * shift_cascade_frames
+			start_col.append(start)
+			dur_col.append(dur)
+			level_col.append(float(from_tile["height"]))   # seed at FROM so frame 0 looks unchanged
+			_shift_total = maxf(_shift_total, start + dur)
+		_shift_start.append(start_col)
+		_shift_dur.append(dur_col)
+		_anim_level.append(level_col)
+	if _shift_total <= 0.0:
+		_finish_shift_animation()   # nothing changed — snap to the new state and announce
+		return
+	_shift_active = true
+	set_process(true)
+
+
+## Whether any visible face of the tile (top / sides / underside) changes terrain type across the
+## shift — i.e. whether there's a color to morph. Drives the color-morph duration floor.
+func _tile_color_changes(from_tile: Dictionary, to_tile: Dictionary) -> bool:
+	for face in [TileFaces.Face.TOP, TileFaces.Face.NORTH, TileFaces.Face.BOTTOM]:
+		if TileFaces.face_type(from_tile, face) != TileFaces.face_type(to_tile, face):
+			return true
+	return false
+
+
+## Per-frame tick of the cascade (only while `_shift_active`). Advances the frame clock, redraws the
+## whole map at the current interpolation, and finishes once every tile's morph has played out.
+func _process(delta: float) -> void:
+	if not _shift_active:
+		return
+	_shift_elapsed += delta * 60.0   # treat one "frame" as 1/60s so the export tuning reads in frames
+	# First fill every tile's interpolated height, THEN draw — so each tile's neighbour-aware column
+	# depth sees its neighbours' animating heights (cliffs grow/shrink smoothly with the wave).
+	for x in grid_width:
+		for z in grid_height:
+			var t := _tile_progress(x, z)
+			_anim_level[x][z] = lerpf(float(_shift_from[x][z]["height"]), float(_shift_to[x][z]["height"]), t)
+	for x in grid_width:
+		for z in grid_height:
+			_draw_shift_tile(x, z)
+	if _shift_elapsed >= _shift_total:
+		_finish_shift_animation()
+
+
+## How far tile (x, z) is through its own morph this frame, 0→1. Before its wavefront arrives it's 0;
+## after its duration it's 1; a zero-duration (unchanged) tile is simply 1.
+func _tile_progress(x: int, z: int) -> float:
+	var dur: float = _shift_dur[x][z]
+	if dur <= 0.0:
+		return 1.0
+	return clampf((_shift_elapsed - _shift_start[x][z]) / dur, 0.0, 1.0)
+
+
+## Draw one tile mid-morph: interpolate its height (and the liquid recess) and lerp each face's color
+## between the from- and to-type, using per-tile morph materials so other tiles of the same type are
+## untouched. Routes through the same `_apply_tile_geometry` the static render uses.
+func _draw_shift_tile(x: int, z: int) -> void:
+	var t := _tile_progress(x, z)
+	var from_tile: Dictionary = _shift_from[x][z]
+	var to_tile: Dictionary = _shift_to[x][z]
+
+	# Visible top: animated rim minus the liquid recess, itself eased in as a tile turns liquid.
+	var own_top: float = _anim_level[x][z] * height_step
+	var recess := lerpf(_recess_for(from_tile["type"]), _recess_for(to_tile["type"]), t)
+	var surface_top: float = own_top - recess
+
+	# Column underside from the lowest animating neighbour (mirrors `_column_bottom_in` on floats), so
+	# the cliff faces between tiles at different heights grow/shrink through the morph.
+	var lowest: float = own_top
+	for dir in _ORTHO_DIRS:
+		var d: Vector2i = dir
+		var nx: int = x + d.x
+		var nz: int = z + d.y
+		if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
+			lowest = minf(lowest, _anim_level[nx][nz] * height_step)
+	var base_y: float = lowest if lowest < own_top else own_top - float(min_body_depth) * height_step
+
+	var refs: Dictionary = _tiles[x][z]
+	var body_mat := _anim_material(refs, "body_mat", from_tile, to_tile, TileFaces.Face.NORTH, t)
+	var surface_mat := _anim_material(refs, "surface_mat", from_tile, to_tile, TileFaces.Face.TOP, t)
+	var bottom_mat := _anim_material(refs, "bottom_mat", from_tile, to_tile, TileFaces.Face.BOTTOM, t)
+	_apply_tile_geometry(refs, base_y, surface_top, body_mat, surface_mat, bottom_mat)
+
+
+## The liquid surface recess for a terrain `type` (0 for solid ground) — the amount the visible cap
+## drops; lerped during a morph so water "fills in" as a tile becomes liquid.
+func _recess_for(type: int) -> float:
+	return liquid_recess if TileTypes.is_liquid(type) else 0.0
+
+
+## Get (creating once, cached in the tile's `refs`) a per-tile morph material for `key`, set to the
+## color of `face` lerped between the from- and to-type. Per-tile so morphing one tile never tints
+## the shared per-type materials (and thus every other tile of that type). Reused across shifts; the
+## static `render_state` swaps the shared materials back in when the cascade finishes.
+func _anim_material(refs: Dictionary, key: String, from_tile: Dictionary, to_tile: Dictionary, face: int, t: float) -> StandardMaterial3D:
+	if not refs.has(key):
+		refs[key] = StandardMaterial3D.new()
+	var mat: StandardMaterial3D = refs[key]
+	var from_col := TileTypes.surface_color(TileFaces.face_type(from_tile, face))
+	var to_col := TileTypes.surface_color(TileFaces.face_type(to_tile, face))
+	mat.albedo_color = from_col.lerp(to_col, t)
+	return mat
+
+
+## End the cascade: stop ticking and render the final state cleanly (which restores the shared,
+## cached per-type materials over the per-tile morph ones), then announce completion.
+func _finish_shift_animation() -> void:
+	_shift_active = false
+	set_process(false)
 	render_state(_current_index)
-	print("Battlefield: shifted to time-state %d / %d" % [_current_index + 1, states.size()])
+	shift_animation_finished.emit()
 
 
 # --- Grid <-> world helpers (seed of the future coordinate-helper module) -----
 
-## World height of the *top surface* of tile (x, z) in the current state. Units
-## stand at this Y. This is intentionally derived from tile data, not stored, so
-## it stays correct across shifts.
+## World height of a tile's integer RIM (its `height` level in world units) in the current state.
+## This is the gameplay surface — jump, movement range, and pathing all compare against it. NOTE: it
+## is *not* where a unit's feet sit on a liquid (those recess; see `_surface_world_y` /
+## `unit_stand_world`), nor where surface markers draw (`tile_to_world`). Derived from tile data, not
+## stored, so it stays correct across shifts.
 func tile_height(x: int, z: int) -> float:
 	return current_state()[x][z]["height"] * height_step
 
 
-## World position of the center of the top surface of tile (x, z) in the current
-## state — i.e. where a unit standing on that tile sits. Movement, line of sight,
-## and combat will build on this.
+## World position of the center of a tile's VISIBLE top surface in the current state — i.e. where
+## a marker (path/attack/active) sits and the surface a unit's feet meet. For a liquid tile this is
+## the recessed water line (see `liquid_recess`), NOT the integer rim — that's why it reads from
+## `_surface_world_y` rather than the integer `tile_height`. Movement, targeting overlays, and the
+## camera all build on this.
 func tile_to_world(x: int, z: int) -> Vector3:
-	return Vector3(_grid_to_world_x(x), tile_height(x, z), _grid_to_world_z(z))
+	return Vector3(_grid_to_world_x(x), _surface_world_y(current_state(), x, z), _grid_to_world_z(z))
+
+
+## Where a UNIT'S origin rests when standing on tile (x, z): the visible surface, dropped a further
+## `liquid_sink` on liquids so the cylinder sits *in* the water rather than on it. Solid tiles match
+## `tile_to_world` exactly. This is the seam used for spawn placement and the walk path (see
+## `path_to_world_points`), kept separate from `tile_to_world` so only the unit sinks, not the
+## surface markers that mark the water line.
+func unit_stand_world(x: int, z: int) -> Vector3:
+	var p := tile_to_world(x, z)
+	if TileTypes.is_liquid(surface_type(x, z)):
+		p.y -= liquid_sink
+	return p
+
+
+## The surface (cap) terrain `TileTypes.Type` of tile (x, z) in the current state — the gameplay
+## type that drives move cost, casting legality, hazard damage, and the liquid tag. The single
+## accessor `Main` reads for those rules, so it never reaches into the raw state dictionary.
+func surface_type(x: int, z: int) -> int:
+	return current_state()[x][z]["type"]
+
+
+## The integer height LEVEL of tile (x, z) in the current state (the raw value before `height_step`
+## world scaling) — the same units a `jump` stat is in. Public twin of the internal `_height_units`,
+## exposed so `Main` can measure how far a unit fell across a time-shift (in levels) for fall damage.
+func height_level(x: int, z: int) -> int:
+	return current_state()[x][z]["height"]
+
+
+## World Y of a tile's VISIBLE top within `state`: the integer rim (`height * height_step`) for
+## solid terrain, dropped by `liquid_recess` for a liquid surface so water sits in a shallow basin.
+## Shared by `tile_to_world` (current state) and `render_state` (any state) so the drawn cap, the
+## collision box, and everything that sits on the surface agree on one height. Note this is
+## deliberately NOT used by the jump/range math — those stay on the integer `tile_height` so the
+## cosmetic recess never changes which steps are legal.
+func _surface_world_y(state: Array, x: int, z: int) -> float:
+	var top: float = state[x][z]["height"] * height_step
+	if TileTypes.is_liquid(state[x][z]["type"]):
+		top -= liquid_recess
+	return top
 
 
 ## World Y of tile (x, z)'s column UNDERSIDE in the current state — where its drawn body
@@ -350,8 +609,10 @@ static func expand_path(waypoints: Array) -> Array:
 func path_to_world_points(tiles: Array) -> Array:
 	var points: Array[Vector3] = []
 	for i in range(1, tiles.size()):
-		var a: Vector3 = tile_to_world(tiles[i - 1].x, tiles[i - 1].y)
-		var b: Vector3 = tile_to_world(tiles[i].x, tiles[i].y)
+		# Walk at the UNIT'S standing height (sunk into liquids), not the bare surface, so a unit
+		# wading through water dips down step by step instead of skating across its surface.
+		var a: Vector3 = unit_stand_world(tiles[i - 1].x, tiles[i - 1].y)
+		var b: Vector3 = unit_stand_world(tiles[i].x, tiles[i].y)
 		if b.y > a.y:
 			# Stepping UP: rise in place over tile A to B's height, then move onto B.
 			# Rising above its own tile first keeps the body off the cliff face.
@@ -386,43 +647,61 @@ func _height_units(x: int, z: int) -> int:
 	return current_state()[x][z]["height"]
 
 
-## Breadth-first flood of every tile the active unit can both REACH and legally STOP on
-## from `start`, spending at most `move_points` orthogonal steps. Each step costs 1; a
-## step is walkable only when the height change to the neighbour is within `jump` AND the
-## neighbour isn't in `solid` (impassable — e.g. an enemy unit). Tiles in `occupied`
-## (any unit standing there) can be walked THROUGH but not stopped on, so they still
-## expand the flood yet are left out of the returned set. Returns `{ Vector2i: cost }`,
-## always including `start` at cost 0. This is the data the move-range outline draws from.
+## Flood of every tile the active unit can both REACH and legally STOP on from `start`, spending at
+## most `move_points`. The cost to ENTER a tile is that tile's terrain `move_cost` (1 for most
+## ground, 2 for liquids) — NOT a flat 1 per step — so wading costs more than walking. A step is
+## walkable only when the height change to the neighbour is within `jump` AND the neighbour isn't in
+## `solid` (impassable — e.g. an enemy unit). Tiles in `occupied` (any unit standing there) can be
+## walked THROUGH but not stopped on, so they still expand the flood yet are left out of the
+## returned set. Returns `{ Vector2i: cost }`, always including `start` at cost 0. This is the data
+## the move-range outline draws from.
 ##
-## Uniform step cost means plain BFS suffices: the first time a tile is reached is along
-## a shortest route, so a tile already in `costs` never needs revisiting.
+## Because step costs now VARY, a plain BFS no longer guarantees the first arrival is cheapest, so
+## this is a small Dijkstra: each pass pops the cheapest unfinalized ("unvisited") tile and relaxes
+## its neighbours. The grids are small and the reachable region is bounded by the move budget, so
+## the linear-scan min-extraction is plenty fast (no heap needed).
 func reachable_tiles(start: Vector2i, move_points: int, jump: int, solid: Dictionary, occupied: Dictionary) -> Dictionary:
-	# `costs` records every visited tile (including walked-through occupied ones) so the
-	# flood won't re-expand them; `result` holds only the tiles that are legal to stop on.
-	var costs := {start: 0}
+	# `dist` is the best known cost to each tile (the Dijkstra frontier + settled set); `visited`
+	# marks tiles whose cost is finalized; `result` mirrors `dist` but excludes tiles you can't stop
+	# on (occupied), since those expand the flood but aren't valid destinations.
+	var dist := {start: 0}
+	var visited := {}
 	var result := {start: 0}
-	var frontier: Array[Vector2i] = [start]
-	var head := 0   # index-based queue front — cheaper than pop_front() on a big flood
-	while head < frontier.size():
-		var cur: Vector2i = frontier[head]
-		head += 1
-		var cur_cost: int = costs[cur]
+	while true:
+		# Pop the cheapest tile we haven't finalized yet (Dijkstra's "next nearest").
+		var cur: Vector2i = start
+		var cur_cost := -1
+		var found := false
+		for t in dist:
+			if visited.has(t):
+				continue
+			if not found or dist[t] < cur_cost:
+				cur = t
+				cur_cost = dist[t]
+				found = true
+		if not found:
+			break   # every reachable tile is finalized
+		visited[cur] = true
 		if cur_cost >= move_points:
 			continue   # no budget left to step further from here
 		for dir in _ORTHO_DIRS:
 			var n: Vector2i = cur + dir
 			if n.x < 0 or n.x >= grid_width or n.y < 0 or n.y >= grid_height:
 				continue   # off the grid
-			if costs.has(n):
-				continue   # already reached along an equal/shorter route
+			if visited.has(n):
+				continue   # already finalized at its cheapest cost
 			if solid.has(n):
 				continue   # impassable tile (enemy unit)
 			if abs(_height_units(n.x, n.y) - _height_units(cur.x, cur.y)) > jump:
 				continue   # climb/drop is taller than this unit's jump
-			costs[n] = cur_cost + 1
-			if not occupied.has(n):
-				result[n] = cur_cost + 1   # reachable AND free to stand on
-			frontier.append(n)
+			var nc: int = cur_cost + TileTypes.move_cost(surface_type(n.x, n.y))
+			if nc > move_points:
+				continue   # can't afford to enter this tile
+			if not dist.has(n) or nc < dist[n]:
+				dist[n] = nc
+				# Reachable, but only a legal STOP if no one is standing there.
+				if not occupied.has(n):
+					result[n] = nc
 	return result
 
 
@@ -434,56 +713,72 @@ func reachable_tiles(start: Vector2i, move_points: int, jump: int, solid: Dictio
 ## set, which already excludes occupied tiles, so `_occupied` isn't needed here — it's
 ## accepted only so this mirrors `reachable_tiles`' signature.
 ##
-## BFS with parent links: uniform step cost means the first time we reach `dest` is along a
-## shortest route, so we record where each tile was reached *from* and, on hitting `dest`,
-## walk that chain back to `start` and flip it. The enemy AI hands the result to
-## `Unit.move_along`; the player builds its route from waypoints + `expand_path` instead.
+## Dijkstra with parent links (the variable per-tile `move_cost` rules out plain BFS, exactly as in
+## `reachable_tiles`): we settle tiles cheapest-first, recording where each was reached most cheaply
+## *from*, and once `dest` is finalized we walk that chain back to `start` and flip it. The enemy AI
+## hands the result to `Unit.move_along`; the player builds its route from waypoints + `expand_path`.
 func find_path(start: Vector2i, dest: Vector2i, move_points: int, jump: int, solid: Dictionary, _occupied: Dictionary) -> Array:
 	var path: Array[Vector2i] = []
 	if start == dest:
 		return [start]   # already there — a one-tile path (no steps to walk)
-	var came_from := {start: start}   # tile -> the tile we first reached it from
-	var costs := {start: 0}
-	var frontier: Array[Vector2i] = [start]
-	var head := 0
-	while head < frontier.size():
-		var cur: Vector2i = frontier[head]
-		head += 1
-		if costs[cur] >= move_points:
+	var dist := {start: 0}
+	var visited := {}
+	var came_from := {start: start}   # tile -> the tile we reached it most cheaply from
+	while true:
+		# Pop the cheapest unfinalized tile (Dijkstra's next nearest).
+		var cur: Vector2i = start
+		var cur_cost := -1
+		var found := false
+		for t in dist:
+			if visited.has(t):
+				continue
+			if not found or dist[t] < cur_cost:
+				cur = t
+				cur_cost = dist[t]
+				found = true
+		if not found:
+			break   # exhausted everything reachable within budget without settling dest
+		visited[cur] = true
+		if cur == dest:
+			break   # dest finalized at its cheapest cost — stop and rebuild the route
+		if cur_cost >= move_points:
 			continue   # no budget left to step further from here
 		for dir in _ORTHO_DIRS:
 			var n: Vector2i = cur + dir
 			if n.x < 0 or n.x >= grid_width or n.y < 0 or n.y >= grid_height:
 				continue   # off the grid
-			if costs.has(n):
-				continue   # already reached along an equal/shorter route
+			if visited.has(n):
+				continue   # already finalized at its cheapest cost
 			if solid.has(n):
 				continue   # impassable tile (enemy unit)
 			if abs(_height_units(n.x, n.y) - _height_units(cur.x, cur.y)) > jump:
 				continue   # climb/drop taller than this unit's jump
-			costs[n] = costs[cur] + 1
-			came_from[n] = cur
-			if n == dest:
-				# Reconstruct dest -> … -> start via parents, then reverse to walk order.
-				var node := dest
-				while node != start:
-					path.append(node)
-					node = came_from[node]
-				path.append(start)
-				path.reverse()
-				return path
-			frontier.append(n)
+			var nc: int = cur_cost + TileTypes.move_cost(surface_type(n.x, n.y))
+			if nc > move_points:
+				continue   # can't afford to enter this tile
+			if not dist.has(n) or nc < dist[n]:
+				dist[n] = nc
+				came_from[n] = cur
+	if not visited.has(dest):
+		return path   # unreachable within the move budget — empty path
+	# Reconstruct dest -> … -> start via parents, then reverse to walk order.
+	var node: Vector2i = dest
+	while node != start:
+		path.append(node)
+		node = came_from[node]
+	path.append(start)
+	path.reverse()
 	return path
 
 
 ## Per-tile legality for a concrete, already-expanded `tiles` path (parallel to it). The
 ## start tile (index 0) is always legal — the unit is standing on it. Walking outward, a
-## step stays legal only while every prior step was legal AND: its index (== cumulative
-## cost, since each step is one tile) is within `move_points`, the height change is within
-## `jump`, and it doesn't enter a `solid` tile; additionally the FINAL tile must not be
-## `occupied` (you can pass through an ally but not stop on one). Once a tile is illegal,
-## every later tile is too. This drives the blue/red split in the path preview, and the
-## commit gate reuses it (a path with any `false` is refused).
+## step stays legal only while every prior step was legal AND: the cumulative cost so far
+## (each tile costs its own terrain `move_cost`, so liquids count double) is within
+## `move_points`, the height change is within `jump`, and it doesn't enter a `solid` tile;
+## additionally the FINAL tile must not be `occupied` (you can pass through an ally but not
+## stop on one). Once a tile is illegal, every later tile is too. This drives the blue/red
+## split in the path preview, and the commit gate reuses it (a path with any `false` is refused).
 func classify_path(tiles: Array, move_points: int, jump: int, solid: Dictionary, occupied: Dictionary) -> Array:
 	var flags: Array[bool] = []
 	if tiles.is_empty():
@@ -491,11 +786,13 @@ func classify_path(tiles: Array, move_points: int, jump: int, solid: Dictionary,
 	flags.append(true)   # tiles[0] is the unit's current tile — always fine
 	var last := tiles.size() - 1
 	var legal_so_far := true
+	var cost := 0   # cumulative move points spent ENTERING tiles[1..i] (matches the Dijkstra cost)
 	for i in range(1, tiles.size()):
 		var ok := legal_so_far
 		if ok:
+			cost += TileTypes.move_cost(surface_type(tiles[i].x, tiles[i].y))
 			var climb: int = abs(_height_units(tiles[i].x, tiles[i].y) - _height_units(tiles[i - 1].x, tiles[i - 1].y))
-			if i > move_points:
+			if cost > move_points:
 				ok = false            # past the move budget
 			elif climb > jump:
 				ok = false            # step too tall for this unit's jump
@@ -847,59 +1144,73 @@ func _build_tiles() -> void:
 
 ## Draw the state at `index`: rescale and recolor every tile's column + cap to
 ## match that state's height and type. Because we reuse the tile nodes, a shift
-## is just a bulk update of transforms and material overrides.
+## is just a bulk update of transforms and material overrides. Each tile resolves its
+## heights + per-face materials (the cached, shared ones) and hands them to the single
+## `_apply_tile_geometry` drawer — the same drawer the cascade morph uses with animated
+## values, so the static and animated renders can never disagree about a tile's shape.
 func render_state(index: int) -> void:
 	var state: Array = states[index]
 	for x in grid_width:
 		for z in grid_height:
 			var tile: Dictionary = state[x][z]
-			var surface_top: float = tile["height"] * height_step
+			# The VISIBLE top: a liquid surface is recessed below its integer rim (see
+			# `_surface_world_y`), so water reads as a basin. The cap, column, and click box all
+			# build from this; `base_y` below still uses integer neighbour heights for the cliffs.
+			var surface_top: float = _surface_world_y(state, x, z)
 			# The column's UNDERSIDE: only as deep as the lowest adjacent surface (so a side
 			# face spans exactly the exposed cliff, not all the way to y=0), with a thin
 			# minimum slab on flat ground / borders. A carved-down tile's neighbours are
 			# taller, so THEIR underside drops to this tile's top — covering the pit wall.
 			var base_y: float = _column_bottom_in(state, x, z)
-			var total: float = maxf(surface_top - base_y, 0.02)
+			_apply_tile_geometry(
+				_tiles[x][z], base_y, surface_top,
+				_face_material(tile, TileFaces.Face.NORTH),   # body / sides
+				_face_material(tile, TileFaces.Face.TOP),     # surface cap
+				_face_material(tile, TileFaces.Face.BOTTOM))  # underside cap
 
-			# Split the column into a brown middle plus a thin colored cap on the TOP and the
-			# BOTTOM. Dividing by 3 reserves room for BOTH caps even on a very short block; a
-			# normal block still gets the full `cap_thickness`. The three layers (bottom cap /
-			# column / top cap) stack from `base_y` up to `surface_top`.
-			var cap_h: float = min(cap_thickness, total / 3.0)
-			var column_h: float = max(total - 2.0 * cap_h, 0.02)
 
-			var refs: Dictionary = _tiles[x][z]
+## Draw ONE tile's geometry into its `refs` nodes from already-resolved values: the column
+## underside `base_y`, the visible `surface_top`, and the three face materials. Stacks a thin
+## bottom cap, a body column, and a thin top cap from `base_y` up to `surface_top`, and keeps the
+## click box spanning the whole visible block. Factored out of `render_state` so the cascade morph
+## (`_draw_shift_tile`) reuses the exact same layout math with interpolated heights/colors.
+func _apply_tile_geometry(refs: Dictionary, base_y: float, surface_top: float,
+		body_mat: StandardMaterial3D, surface_mat: StandardMaterial3D, bottom_mat: StandardMaterial3D) -> void:
+	var total: float = maxf(surface_top - base_y, 0.02)
+	# Dividing by 3 reserves room for BOTH caps even on a very short block; a normal block still
+	# gets the full `cap_thickness`. The three layers (bottom cap / column / top cap) stack up.
+	var cap_h: float = min(cap_thickness, total / 3.0)
+	var column_h: float = max(total - 2.0 * cap_h, 0.02)
 
-			# Underside cap: a thin slab at the block's base, colored by the tile's BOTTOM
-			# face type (defaults to the body color — see TileFaces.face_type).
-			var bottom: MeshInstance3D = refs["bottom"]
-			bottom.scale = Vector3(tile_size, cap_h, tile_size)
-			bottom.position = Vector3(0.0, base_y + cap_h * 0.5, 0.0)
-			var bottom_type: int = TileFaces.face_type(tile, TileFaces.Face.BOTTOM)
-			bottom.material_override = _earth_material if bottom_type == TileTypes.Type.DIRT else _surface_material(bottom_type)
+	# Underside cap: a thin slab at the block's base.
+	var bottom: MeshInstance3D = refs["bottom"]
+	bottom.scale = Vector3(tile_size, cap_h, tile_size)
+	bottom.position = Vector3(0.0, base_y + cap_h * 0.5, 0.0)
+	bottom.material_override = bottom_mat
 
-			# A scaled 1x1x1 box: scale.y is the height, scale.x/z the footprint.
-			# Position is the box *center*; the column sits ABOVE the bottom cap.
-			var earth: MeshInstance3D = refs["earth"]
-			earth.scale = Vector3(tile_size, column_h, tile_size)
-			earth.position = Vector3(0.0, base_y + cap_h + column_h * 0.5, 0.0)
-			# The column (sides) are colored by the tile's BODY type — brown dirt by
-			# default, or a built-block color (e.g. stucco) so it doesn't show earth.
-			# DIRT reuses the one shared brown material; other bodies get a cached one.
-			# (All four sides share one body type today — TileFaces.face_type centralizes
-			# that so per-side types are an additive change later, not a reshape here.)
-			var body_type: int = TileFaces.face_type(tile, TileFaces.Face.NORTH)
-			earth.material_override = _earth_material if body_type == TileTypes.Type.DIRT else _surface_material(body_type)
+	# A scaled 1x1x1 box: scale.y is the height, scale.x/z the footprint. Position is the box
+	# *center*; the column sits ABOVE the bottom cap.
+	var earth: MeshInstance3D = refs["earth"]
+	earth.scale = Vector3(tile_size, column_h, tile_size)
+	earth.position = Vector3(0.0, base_y + cap_h + column_h * 0.5, 0.0)
+	earth.material_override = body_mat
 
-			var surface: MeshInstance3D = refs["surface"]
-			surface.scale = Vector3(tile_size, cap_h, tile_size)
-			surface.position = Vector3(0.0, surface_top - cap_h * 0.5, 0.0)
-			surface.material_override = _surface_material(TileFaces.face_type(tile, TileFaces.Face.TOP))
+	var surface: MeshInstance3D = refs["surface"]
+	surface.scale = Vector3(tile_size, cap_h, tile_size)
+	surface.position = Vector3(0.0, surface_top - cap_h * 0.5, 0.0)
+	surface.material_override = surface_mat
 
-			# Keep the click-collision box in sync with the VISIBLE block ([base_y, top]),
-			# so picking stays correct after a shift AND a click on the underside / a side
-			# face lands on real geometry (needed by the designer's face-aware tools).
-			var collision: CollisionShape3D = refs["collision"]
-			var pick_h: float = max(total, 0.02)
-			(collision.shape as BoxShape3D).size = Vector3(tile_size, pick_h, tile_size)
-			collision.position = Vector3(0.0, base_y + pick_h * 0.5, 0.0)
+	# Keep the click-collision box in sync with the VISIBLE block ([base_y, top]), so picking stays
+	# correct after a shift AND a click on the underside / a side face lands on real geometry.
+	var collision: CollisionShape3D = refs["collision"]
+	var pick_h: float = max(total, 0.02)
+	(collision.shape as BoxShape3D).size = Vector3(tile_size, pick_h, tile_size)
+	collision.position = Vector3(0.0, base_y + pick_h * 0.5, 0.0)
+
+
+## The cached, shared material for a tile's `face` (the steady-state, non-morph material). DIRT
+## reuses the one brown `_earth_material`; every other type gets a per-type cached material. This is
+## the resolver `render_state` uses; the morph uses per-tile lerp materials instead (`_anim_material`).
+func _face_material(tile: Dictionary, face: int) -> StandardMaterial3D:
+	var type: int = TileFaces.face_type(tile, face)
+	return _earth_material if type == TileTypes.Type.DIRT else _surface_material(type)
