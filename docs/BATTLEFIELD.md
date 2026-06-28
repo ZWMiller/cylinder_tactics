@@ -186,21 +186,29 @@ and the liquid sink-in tuning `liquid_recess` / `liquid_sink`.
 an assigned **`map_data`** resource → a directly-assigned **`states`** array → the
 built-in **`DemoMap`** fallback. Once a map is resolved, `_adopt_dimensions_from_states()`
 overwrites `grid_width`/`grid_height` with that map's actual size — so those two exports
-now only size the *DemoMap fallback*; a loaded map's own dimensions win. To use a
+now only size the *SmallDemoMap fallback*; a loaded map's own dimensions win. To use a
 different map: assign a `MapData` (`.tres`) to `map_data`, assign `states` before the node
-enters the tree, or swap the `DemoMap.generate(...)` call in `_ready()`.
+enters the tree, or swap the `SmallDemoMap.generate(...)` call in `_ready()`.
 
-## The demo map (3 states)
+## The demo maps (3 states each)
 
-0. **Grassland** — flat grass with a hill rising from grid corner `(0,0)`.
-1. **Canyon** — a river has carved a channel diagonally from the hill across the
-   grassland; channel tiles are sunk to the canyon floor and turned to water, so the
-   cut through the hill shows tall brown walls.
-2. **Desert** — all sand, the hill lower and spread out, the river now a dry stone
-   riverbed sunk below the sand.
+The fallback is **`SmallDemoMap`** (12×12) — the small map the game boots into for
+playtesting. The original **`DemoMap`** (24×24) is kept in `scripts/maps/` for reference;
+both follow the same three-state "degrading time" cycle:
 
-All three are generated procedurally from parameters in `DemoMap.gd` (hill falloff,
-river path, etc.) rather than hand-authored, so 1,728 tiles cost no hand-typing.
+0. **Grassland** — flat grass with a hill rising from each corner (`SmallDemoMap`; `DemoMap`
+   has a single hill at corner `(0,0)`), and a flat-ish diamond in the middle.
+1. **Canyon** — a river has carved a channel diagonally across the grassland, cutting through
+   two of the corner hills; channel tiles are sunk to the canyon floor and turned to water, so
+   the cut through a hill shows tall brown walls.
+2. **Desert** — all sand, the hills lower and spread out, the river now a dry **stone** riverbed
+   sunk below the sand (same channel path as the canyon).
+
+Both are generated procedurally from parameters (hill peak/falloff, river path) rather than
+hand-authored. `SmallDemoMap`'s four-corner hill sets each tile's height from its **nearest**
+corner (Manhattan distance), so the hills fade to the flat center. The demo roster spawns
+(`PartyLoadout.party` players on `z=4`, `Main._enemy_roster` enemies on `z=7`) sit on that flat
+center, clear of the corner hills.
 
 ## Running it
 

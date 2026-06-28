@@ -37,9 +37,11 @@ const RECRUIT_WISP := preload("res://assets/recruits/wisp.tres")  # Mage
 ## `Main` spawns players from this list; `Loadout` lets the player gear each one up. A dictionary
 ## per entry (rather than a bare array) so the fields read by name at every use site.
 var party: Array = [
-	{"recruit": RECRUIT_BRON, "x": 10, "z": 10},
-	{"recruit": RECRUIT_DART, "x": 12, "z": 10},
-	{"recruit": RECRUIT_WISP, "x": 14, "z": 10},
+	# Positioned for the 12x12 SmallDemoMap: spread across the flat middle row (z=4), clear of the
+	# four corner hills, facing the enemy line on z=7.
+	{"recruit": RECRUIT_BRON, "x": 3, "z": 4},
+	{"recruit": RECRUIT_DART, "x": 5, "z": 4},
+	{"recruit": RECRUIT_WISP, "x": 7, "z": 4},
 ]
 
 # --- Stored loadouts ---------------------------------------------------------

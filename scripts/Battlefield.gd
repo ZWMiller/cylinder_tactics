@@ -4,7 +4,7 @@
 ## This node is deliberately *generic and size-agnostic* — it knows how to render
 ## and cycle a list of states, but not what any particular map looks like. The
 ## actual map data is supplied as `states` (a configuration); if none is provided
-## it falls back to `DemoMap` so the scene shows something on F5.
+## it falls back to `SmallDemoMap` so the scene shows something on F5.
 ##
 ## Data model (matches the design doc):
 ##   - A *tile* is a Dictionary `{ "height": int, "type": int }`, where `type` is a
@@ -50,19 +50,19 @@ const _ORTHO_DIRS := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(
 
 ## Optional saved map to load — a `MapData` resource (e.g. authored in the map
 ## designer, or a hand-built `.tres`). When assigned this WINS over a directly-set
-## `states` and over the DemoMap fallback, and its dimensions overwrite the
+## `states` and over the SmallDemoMap fallback, and its dimensions overwrite the
 ## `grid_width`/`grid_height` below (maps are variable-size; the data is the
-## authority). Leave null to fall back to `states` or the built-in DemoMap.
+## authority). Leave null to fall back to `states` or the built-in SmallDemoMap.
 @export var map_data: MapData
 
 ## Number of tiles along the X axis. NOTE: this is only the size used to GENERATE the
-## DemoMap fallback — once a real map loads (`map_data` or an assigned `states`), it is
+## SmallDemoMap fallback — once a real map loads (`map_data` or an assigned `states`), it is
 ## overwritten with that map's width in `_ready`. There is intentionally no upper limit.
-@export var grid_width: int = 24
+@export var grid_width: int = 12
 
-## Number of tiles along the Z axis. Like `grid_width`, this only sizes the DemoMap
+## Number of tiles along the Z axis. Like `grid_width`, this only sizes the SmallDemoMap
 ## fallback; a loaded map's height replaces it.
-@export var grid_height: int = 24
+@export var grid_height: int = 12
 
 ## World-space width/depth of a single tile. Tiles are placed flush (no gap).
 @export var tile_size: float = 1.0
@@ -119,7 +119,7 @@ const _ORTHO_DIRS := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(
 
 # --- Runtime state -----------------------------------------------------------
 
-## The ordered list of time-states. Leave empty to use the built-in DemoMap, or
+## The ordered list of time-states. Leave empty to use the built-in SmallDemoMap, or
 ## assign your own configuration before this node enters the tree.
 var states: Array = []
 
@@ -293,11 +293,11 @@ func _ready() -> void:
 
 	# Resolve the map source, in priority order: an assigned MapData resource (the
 	# saved/designed format), then a directly-assigned `states` (procedural callers),
-	# then the built-in DemoMap so the scene always shows something on F5.
+	# then the built-in SmallDemoMap so the scene always shows something on F5.
 	if map_data != null:
 		states = map_data.to_states()
 	elif states.is_empty():
-		states = DemoMap.generate(grid_width, grid_height)
+		states = SmallDemoMap.generate(grid_width, grid_height)
 
 	# Maps are variable-size, so the loaded data — not the exports — is the authority
 	# on dimensions. Adopt them before building tiles, since all the grid math
@@ -1086,7 +1086,7 @@ func _surface_material(type: int) -> StandardMaterial3D:
 ## own size drives the grid (variable-size maps). States are rectangular `state[x][z]`,
 ## so width is the number of X columns and height the length of any column. Assumes at
 ## least one non-empty state — guaranteed here because `_ready` always resolves a map
-## (MapData, an assigned `states`, or the DemoMap fallback) before calling this.
+## (MapData, an assigned `states`, or the SmallDemoMap fallback) before calling this.
 func _adopt_dimensions_from_states() -> void:
 	grid_width = states[0].size()
 	grid_height = (states[0][0] as Array).size()

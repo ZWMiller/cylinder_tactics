@@ -172,9 +172,12 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
 - [ ] **Line-of-sight + projectile collision** — tall terrain blocks arrows/fireballs and
       targeting (a grid/height LoS check between attacker and target; projectiles respect it).
       Most novel/complex; its own chunk.
-- [ ] **Author new demo maps** in the designer — small, deliberately interesting battle maps
-      (chokepoints, high ground, mixed terrain) as height-state sequences; retire/retune the
-      procedural 24×24 demo cycle.
+- [~] **Author new demo maps** — small, deliberately interesting battle maps (chokepoints, high
+      ground, mixed terrain) as height-state sequences; retire/retune the procedural 24×24 demo cycle.
+      **Done so far:** `SmallDemoMap.gd` — a 12×12 procedural cousin of `DemoMap` with a hill in all
+      four corners (height set by nearest corner) and the same grassland→canyon(river)→desert(stone
+      riverbed) cycle; now the Battlefield fallback, with the demo roster repositioned to the flat
+      center. **Still TODO:** hand-author maps in the designer (this one is still procedural).
 
 ### Next up — ranged + magic attacks, and a Spells menu
 The melee pipeline was built generic for exactly this; most of the work is *data + a projectile

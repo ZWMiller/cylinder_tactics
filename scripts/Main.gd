@@ -92,9 +92,11 @@ enum Phase { MENU, SPELL_MENU, MOVE, ATTACK }
 ## class/level by `StatRoll`. Level 1 (matching the PCs) for a fair test fight while the
 ## combat AI is shaken out; bump for a tougher encounter later.
 @onready var _enemy_roster := [
-	[10, 13, UnitClasses.Class.SOLDIER, 1],
-	[12, 13, UnitClasses.Class.ARCHER, 1],
-	[14, 13, UnitClasses.Class.MAGE, 1],
+	# Positioned for the 12x12 SmallDemoMap: the flat middle row (z=7), clear of the corner hills,
+	# facing the player line on z=4. Each row is [x, z, class, level].
+	[3, 7, UnitClasses.Class.SOLDIER, 1],
+	[5, 7, UnitClasses.Class.ARCHER, 1],
+	[7, 7, UnitClasses.Class.MAGE, 1],
 ]
 
 ## RNG for rolling enemies. Fixed seed (not `randomize()`) for now so each run spawns
