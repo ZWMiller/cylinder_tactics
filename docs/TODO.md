@@ -114,6 +114,27 @@ better. Sequenced so the **saved map format is the linchpin** — once it exists
 size falls out, the designer is "draw → save", and authoring new maps is visual instead of
 tuning falloff constants. Decided: in-game designer scene (new / load-existing / edit /
 save), maps saved as a custom `MapData` Resource (`.tres`).
+
+#### 🐞 Designer bugs to fix next (found playtesting Phase 2)
+- [ ] **Designer view/map off-center.** The map renders offset up-left from the camera's
+      center instead of centered (noticeable after editing/resizing). The camera looks at the
+      world origin and `Battlefield` is supposed to center the grid on origin via
+      `_grid_to_world_x/z` (uses `grid_width`/`grid_height`); something is leaving the visible
+      land off-origin. Investigate: does RESIZE recenter correctly (the `_resize` rebuild +
+      `_adopt_dimensions_from_states`)? Should the designer camera retarget the grid's centroid,
+      or frame to the map's filled extent, rather than assuming origin? Pick: fix centering, or
+      point `CameraController.target` at the actual grid center on load/resize.
+- [ ] **See-through gaps between columns when a tile is lowered below its neighbours** (worst
+      with the HILL valley / lower). Where a tile sits well below the tiles around it, you can
+      see through the seam to the sky (visible as black/background slivers at the base of taller
+      neighbours). Cause is the neighbour-aware "thin slab" column depth: `Battlefield.column_bottom`
+      only drops a column down to its *lowest neighbour*, so a tall column beside a deep pit
+      doesn't extend its side face all the way to the pit floor — leaving a gap. Fix: a column's
+      exposed side face should reach down to the **neighbour it abuts on that side** (per-side
+      bottom), not a single column-wide minimum; or just draw each exposed face down to that
+      neighbour's top. Touches `render_state` (side-face geometry) + `column_bottom`. (The grid
+      overlay already computes per-side drops in `EditableBattlefield._rebuild_grid_overlay` — the
+      same idea applied to the solid mesh.)
 - [x] **Map format + load/save + variable size** — `MapData` / `MapState` resources
       (`scripts/maps/`): a map carries its own `width`/`height` and an ordered list of
       states stored as flat `PackedInt32Array`s (compact, diff-able `.tres`).
@@ -134,15 +155,27 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       window instead of shrinking on big displays; designer fonts centralized into constants +
       a shared dialog Theme. (4) ✅ grid outline extended down cliff faces — DONE: vertical posts
       at every dropped/border edge so steps read fully, not just tile tops. Also: Save dialog
-      now prefills the filename from the map name. **Then Phase 2:** brush macros (Single/Square/
-      Circle/Line/**Hill**, configurable size N, click-drag height) via `set_tiles`. **Phase 3 —
-      Encounter layer:** turn the builder into an *encounter builder* — place enemies (class/
-      weapon/armor/level + per-stat HP/MP/Speed/Move overrides), named characters/bosses, a
-      player **start zone**, and **win-objective tiles** (reach-the-tile victory, not just
+      now prefills the filename from the map name. **Phase 2 DONE:** brush macros — a `Brush`
+      shape (SINGLE / SQUARE / CIRCLE / LINE / HILL) orthogonal to the tool, with a configurable
+      **size** (radius, `-`/`=`) and **click-drag height** (drag up/down sets levels; HILL drags a
+      falloff dome UP for a hill or DOWN for a valley). Footprints route through
+      `EditableBattlefield.set_tiles` (one redraw) with a base-snapshot restore so scrubbing a
+      line/paint leaves no trail; a new `show_footprint` overlay previews the brush. Also added a
+      **5-deep Undo** (`U`) capturing states + name before every edit (brush, resize, New/Load/
+      Rename). **Phase 3 — Encounter layer:** turn the builder into an *encounter builder* — place
+      enemies (class/weapon/armor/level + per-stat HP/MP/Speed/Move overrides), named characters/
+      bosses, a player **start zone**, and **win-objective tiles** (reach-the-tile victory, not just
       elimination); save the whole fight and quick-load to test. Visual front-end for the
       `Encounter` resource; key open question = embed in `MapData` vs a separate `Encounter`
       that references the map. See `docs/map_builder_implementation_plan.md` §10. **Phase 4
-      (later):** multi-state editing.
+      (later):** multi-state editing. **Phase 5 (later) — floating/overhead tiles (doorways,
+      arches, bridges):** let a tile stack carry a gap — "hide tiles in height range A→B at (X,Z)
+      but still show the rest above it" — so you can author doorways, arches, and overpasses. This
+      needs **two (or more) separate tiles at the same (X,Z)** (a walkable lower deck + a span
+      above), which today's single-tile-per-column model and the gameplay resolvers
+      (occupancy/pathing/LoS/`tile_to_world`, all keyed by one height per (X,Z)) don't support —
+      so it's a real data-model + resolver change, not just rendering. Think the data shape through
+      (a per-column list of solid spans? a separate "overhead" layer?) before building.
 - [x] **Terrain vocabulary + property table + two-layer tiles** — `TileTypes` now holds a
       single-source-of-truth table per type: `color`, `move_cost`, `is_liquid`, `can_cast`,
       `hazard_damage` (reserved, lava placeholder). New types: `DIRT` (default body), `LAVA`,

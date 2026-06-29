@@ -32,10 +32,11 @@ designer is "draw → save", and authoring maps is visual.
 1. ✅ **Map format + load/save + variable size** — DONE (commit `2b53438`).
 2. ✅ **Terrain property table + two-layer tiles** — DONE (commit `aca6e55`).
 3. 🔄 **Map designer** — Phase 1 DONE (see §5). §6 fixes #1–#4 all DONE (editable size+name,
-   swatch bar, FileDialog size + project-wide UI scale, full cliff-face grid outline). Next:
-   **Phase 2 (brushes, §9)**, then **Phase 3 (Encounter layer — place enemies / start zone /
-   win tiles, §10)** which turns the map designer into an *encounter builder*, then **Phase 4
-   (multi-state, §11)**.
+   swatch bar, FileDialog size + project-wide UI scale, full cliff-face grid outline).
+   **Phase 2 (brushes + undo, §9) DONE.** Next: **Phase 3 (Encounter layer — place enemies /
+   start zone / win tiles, §10)** which turns the map designer into an *encounter builder*, then
+   **Phase 4 (multi-state, §11)**, then **Phase 5 (floating/overhead tiles — doorways/arches,
+   needs two tiles per (X,Z); see TODO.md)**.
 4. ⬜ **Wire terrain gameplay** — move cost / casting / hazard / liquid depth (see §7).
 5. ⬜ **Line-of-sight + projectile collision** (see §8).
 6. ⬜ **Author new demo maps** in the designer; retire the procedural 24×24 cycle.
@@ -239,9 +240,23 @@ Read the property table (already authored in `TileTypes`) in actual play:
 
 ---
 
-## 9. Phase 2 designer — the brush system (owner's detailed ask)
+## 9. Phase 2 designer — the brush system (owner's detailed ask) — ✅ DONE
 
-After the §6 fixes, build the brush macros. Owner wants:
+**Status:** built. A `Brush` shape (`SINGLE / SQUARE / CIRCLE / LINE / HILL`) is now orthogonal
+to the `Tool`: the brush picks the footprint, the tool (HEIGHT/PAINT) decides the per-tile op.
+`B` cycles the brush, `-`/`=` change the size (a radius for SQUARE/CIRCLE/HILL). Click-drag
+height is in: press-drag-up raises / drag-down lowers a footprint by levels
+(`DRAG_PX_PER_LEVEL`); a plain click keeps the old discrete ±1. HILL is a falloff dome —
+drag UP for a hill, **DOWN for a valley** (no longer floored at the start height) — with a
+right-click "dig a bowl". LINE rasterizes a Bresenham tile line (PAINT draws the type, HEIGHT
+flattens to the start height). All footprints commit through `EditableBattlefield.set_tiles`
+(one redraw); a per-drag base snapshot is restored for tiles that leave the footprint so
+scrubbing a line/paint trail-free. New `EditableBattlefield.show_footprint`/`clear_footprint`
+preview the brush; `SINGLE`+PAINT keeps the face-aware single-tile paint. **Also added: a
+5-deep Undo (`U`)** — `_push_undo` snapshots states+name before every edit (brush stroke,
+resize, New/Load/Rename); `_undo` restores the most recent. One-directional (no redo yet).
+
+Original ask (for reference):
 - **Brush shapes**: `Single`, `Square` (N×N), `Circle` (radius N), `Line` (drag A→B), and a
   **Hill** macro (click + drag UP creates a dome of configurable width N with height
   **falloff** from the center). Possibly more later.

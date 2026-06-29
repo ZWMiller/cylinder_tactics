@@ -7,10 +7,10 @@
 ## no duplicated rendering. This script owns only the *interaction*: a current tool, an
 ## active terrain type, mouse painting, and New/Save/Load.
 ##
-## Scope note: this is the single-state, single-tile first cut. The brush macros
-## (square/circle/line/hill, configurable size, click-drag height) and multi-state
-## (shift-sequence) editing are deliberately deferred — painting already routes through
-## a tile-set entry point so the brushes slot in without reworking this.
+## Scope note: this is the single-state cut. Painting now supports the Phase-2 brush macros
+## (SINGLE / SQUARE / CIRCLE / LINE / HILL with a configurable size + click-drag height),
+## all routed through `EditableBattlefield.set_tiles` for one redraw per edit. Multi-state
+## (shift-sequence) editing and the encounter layer are still deferred (Phases 3-4).
 extends Node3D
 
 # --- Tunables ---------------------------------------------------------------
@@ -34,6 +34,15 @@ const MAPS_DIR := "res://assets/maps"
 ## Translucent white cursor laid on the hovered tile (reuses Battlefield's active marker).
 const HOVER_COLOR := Color(1.0, 1.0, 1.0, 0.45)
 
+## Brush size (radius, in tiles) clamps for the SQUARE / CIRCLE / HILL brushes. 0 = a single
+## tile; each step out adds a ring, so a CIRCLE of size 2 is a 5-tile-wide disc.
+const MIN_BRUSH_SIZE := 0
+const MAX_BRUSH_SIZE := 8
+
+## Screen pixels of vertical mouse drag that equal one height level, for the click-drag
+## height edit (and the Hill brush's peak). Smaller = more sensitive. Tuned by feel.
+const DRAG_PX_PER_LEVEL := 16.0
+
 ## Designer UI font sizes, in design pixels at the project's 1920x1080 base. The
 ## project's `canvas_items` stretch scales them with the window, so these are tuned ONCE
 ## here and stay proportional on every resolution — no per-display fiddling.
@@ -52,6 +61,21 @@ const HUD_PANEL_WIDTH := 520
 ## terrain type onto WHICHEVER face you click — top, a side, or (orbiting under the map)
 ## the underside — routed by the picked face normal (see `_paint_face` / `TileFaces`).
 enum Tool { HEIGHT, PAINT, RESIZE }
+
+## The brush SHAPE — which tiles one edit touches. Orthogonal to the Tool: the brush picks
+## the footprint, the tool (HEIGHT / PAINT) decides what happens to each tile in it. Cycled
+## with `B`; SQUARE / CIRCLE / HILL also read the brush size (`-` / `=`).
+##   SINGLE  — one tile (the classic per-tile edit; PAINT stays face-aware here).
+##   SQUARE  — a (2·size+1)² block centered on the tile.
+##   CIRCLE  — a disc of radius `size`.
+##   LINE    — a 1-wide tile line dragged from press to release (Bresenham). PAINT draws the
+##             type along it; HEIGHT flattens it to the start tile's height.
+##   HILL    — a falloff dome/bowl (peak at center, fading to the rim). Inherently a HEIGHT
+##             brush, so it ignores the Tool. Drag UP raises a hill; drag DOWN digs a valley
+##             (a sunken bowl) — now that heights aren't floored at the start level, the same
+##             brush carves terrain both directions.
+## RESIZE ignores the brush entirely (it edits grid EDGES, not tiles).
+enum Brush { SINGLE, SQUARE, CIRCLE, LINE, HILL }
 
 ## The terrain types offered for painting, in palette order. Number keys 1-9 then 0
 ## quick-select the first ten; `[` / `]` cycle through all of them (so QUICKSAND, the
@@ -72,8 +96,33 @@ var _field: EditableBattlefield
 @onready var _camera: CameraController = $Camera3D
 
 var _tool: int = Tool.HEIGHT          ## Active editing tool.
-var _active_type: int = TileTypes.Type.GRASS  ## Terrain type the SURFACE/BODY tools paint.
+var _brush: int = Brush.SINGLE        ## Active brush shape (see Brush).
+var _brush_size: int = 1              ## Radius for SQUARE / CIRCLE / HILL (tiles out from center).
+var _active_type: int = TileTypes.Type.GRASS  ## Terrain type the PAINT tool paints.
 var _map_name: String = "Untitled"    ## Saved into the MapData; not the filename.
+
+# --- Drag session (left-button press → drag → release) ----------------------
+# A left-click on a painting tool opens a drag: we snapshot the state, then re-derive the
+# whole edit from the snapshot every frame as the mouse moves (vertical distance → height
+# levels for HEIGHT/HILL; the hovered tile → the line/paint footprint). Re-deriving from a
+# fixed base (rather than accumulating) is what lets a drag be scrubbed freely — pull a line
+# back, drag a hill down past flat — without the edit compounding on itself.
+
+# --- Undo history -----------------------------------------------------------
+# A small ring of recent map snapshots so any edit can be taken back with `U`. Each entry
+# captures BOTH the full state stack and the map name, so it reverts brush strokes, resizes,
+# AND a New/Load/Rename. Pushed BEFORE a change lands (so the top of the stack is the state to
+# return to); capped at UNDO_DEPTH, dropping the oldest. One push per interaction (a whole
+# drag is a single undo step, not one per frame), so `U` walks back edits at a human pace.
+const UNDO_DEPTH := 5
+var _undo_stack: Array = []   ## Most-recent snapshot is last; each is { "states", "name" }.
+
+var _dragging: bool = false                              ## A left-drag is in progress.
+var _drag_start_tile: Vector2i = Battlefield.INVALID_TILE  ## Tile under the initial press.
+var _drag_start_y: float = 0.0                           ## Mouse Y at press (height-drag origin).
+var _drag_levels: int = 0                                ## Current height delta from the vertical drag.
+var _drag_base: Array = []                               ## Deep snapshot of the state at press (restore source).
+var _drag_last_footprint: Array = []                     ## Tiles written last apply (restored as the footprint shrinks).
 
 ## HUD label + the save/open file pickers, all built in code.
 var _hud_layer: CanvasLayer    ## Shared CanvasLayer the HUD text + swatch bar live on.
@@ -139,27 +188,52 @@ func _process(_delta: float) -> void:
 	var dialog_open := _dialog_open()
 	_camera.key_orbit_enabled = not dialog_open
 	if dialog_open:
-		_field.clear_hover_face()
-		_field.clear_resize_preview()
+		_clear_cursors()
 		return
 	# Face-aware pick: the PAINT cursor highlights whichever FACE is under the mouse.
 	var pick := _field.tile_and_face_at_screen_point(_camera, get_viewport().get_mouse_position())
 	var tile: Vector2i = pick["tile"]
+	# A live drag owns the feedback: update the edit + the footprint preview, ignore hover.
+	if _dragging:
+		_field.clear_hover_face()
+		_field.clear_resize_preview()
+		_update_drag(tile)
+		return
 	if _tool == Tool.RESIZE:
 		# No paint cursor in resize mode; the green/red edge previews carry the meaning.
 		_field.clear_hover_face()
+		_field.clear_footprint()
 		var sides := _field.sides_at(tile.x, tile.y)   # [] off-grid or on an interior tile
 		if sides.is_empty():
 			_field.clear_resize_preview()
 		else:
 			_field.show_resize_preview(sides)
 		return
-	# Painting tools: face hover cursor, and make sure no stale resize ghost lingers.
+	# Painting tools: make sure no stale resize ghost lingers, then show the brush cursor.
 	_field.clear_resize_preview()
+	_update_hover_preview(tile, pick["face"])
+
+
+## Show the brush cursor for the hovered tile (not dragging). The SINGLE brush under PAINT
+## keeps the face-aware single-quad cursor (so you can still aim at a side/underside); every
+## other brush shows its multi-tile footprint highlighted on the tile tops.
+func _update_hover_preview(tile: Vector2i, face: int) -> void:
 	if tile == Battlefield.INVALID_TILE:
-		_field.clear_hover_face()
+		_clear_cursors()
+		return
+	if _brush == Brush.SINGLE and _tool == Tool.PAINT:
+		_field.clear_footprint()
+		_field.set_hover_face(tile, face, HOVER_COLOR)
 	else:
-		_field.set_hover_face(tile, pick["face"], HOVER_COLOR)
+		_field.clear_hover_face()
+		_field.show_footprint(_brush_footprint(tile), HOVER_COLOR)
+
+
+## Hide every designer cursor (face quad, footprint quads, resize ghosts) at once.
+func _clear_cursors() -> void:
+	_field.clear_hover_face()
+	_field.clear_footprint()
+	_field.clear_resize_preview()
 
 
 ## Keyboard (tools / palette / file ops) and mouse painting. Uses `_unhandled_input` so
@@ -171,12 +245,31 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		_handle_key(event.keycode)
-	elif event is InputEventMouseButton and event.pressed:
-		# Left = primary (raise / paint), Right = secondary (lower, height tool only).
-		if event.button_index == MOUSE_BUTTON_LEFT:
-			_paint_under_mouse(true)
-		elif event.button_index == MOUSE_BUTTON_RIGHT:
-			_paint_under_mouse(false)
+	elif event is InputEventMouseButton:
+		_handle_mouse_button(event)
+
+
+## Route a mouse button. Left opens/closes a drag (or does the immediate RESIZE / face-paint
+## that don't drag); right is a one-shot lower/dig (height brushes only). The pick is resolved
+## once here from the cursor; off-grid presses are no-ops.
+func _handle_mouse_button(event: InputEventMouseButton) -> void:
+	var pick := _field.tile_and_face_at_screen_point(_camera, get_viewport().get_mouse_position())
+	var tile: Vector2i = pick["tile"]
+	if event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			if _tool == Tool.RESIZE:
+				_apply_resize(tile, true)            # grow the hovered edge — no drag
+			elif _tool == Tool.PAINT and _brush == Brush.SINGLE:
+				_paint_single_face(tile, pick["face"])  # face-aware one-tile paint — no drag
+			else:
+				_begin_drag(tile)
+		elif _dragging:
+			_end_drag()
+	elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+		if _tool == Tool.RESIZE:
+			_apply_resize(tile, false)               # shrink the hovered edge
+		else:
+			_apply_secondary(tile)                   # quick lower / dig
 
 
 ## Dispatch a key press to a tool/palette/file action.
@@ -184,6 +277,18 @@ func _handle_key(keycode: int) -> void:
 	match keycode:
 		KEY_TAB:
 			_tool = (_tool + 1) % Tool.size()
+			_refresh_label()
+		KEY_B:
+			# Cycle the brush shape (Single → Square → Circle → Line → Hill → …).
+			_brush = (_brush + 1) % Brush.size()
+			_refresh_label()
+		KEY_U:
+			_undo()
+		KEY_MINUS:
+			_brush_size = clampi(_brush_size - 1, MIN_BRUSH_SIZE, MAX_BRUSH_SIZE)
+			_refresh_label()
+		KEY_EQUAL:
+			_brush_size = clampi(_brush_size + 1, MIN_BRUSH_SIZE, MAX_BRUSH_SIZE)
 			_refresh_label()
 		KEY_BRACKETRIGHT:
 			_select_type((PALETTE.find(_active_type) + 1) % PALETTE.size())
@@ -211,39 +316,18 @@ func _handle_key(keycode: int) -> void:
 				_select_type(digit)
 
 
-## Apply the current tool to the tile under the mouse. `primary` = left click.
-func _paint_under_mouse(primary: bool) -> void:
-	# Face-aware pick: we need both the tile AND which of its faces is under the cursor
-	# (the PAINT tool routes by face). `tile_and_face_at_screen_point` derives the face
-	# from the physics hit normal — see docs/FACES.md (Layer A).
-	var pick := _field.tile_and_face_at_screen_point(_camera, get_viewport().get_mouse_position())
-	var tile: Vector2i = pick["tile"]
+## Paint `_active_type` onto the clicked `face` of tile (x, z), leaving its other faces
+## untouched — the SINGLE-brush PAINT path (no drag). TOP sets the surface type, BOTTOM the
+## underside type, and any of the four sides the (shared) body type. This match is the single
+## place "clicked face → which layer" lives — it's what grows when N/S/E/W become
+## independently typed (each side would target its own field instead of all sharing `body`).
+func _paint_single_face(tile: Vector2i, face: int) -> void:
 	if tile == Battlefield.INVALID_TILE:
-		return
-	# RESIZE acts on the grid, not a tile's data, so handle it before reading tile data.
-	if _tool == Tool.RESIZE:
-		_apply_resize(tile, primary)
 		return
 	var t := _field.tile_data(tile.x, tile.y)
 	if t.is_empty():
 		return
-	match _tool:
-		Tool.HEIGHT:
-			# Left raises, right lowers — by one level, clamped. Preserve the underside.
-			var delta := 1 if primary else -1
-			var new_h: int = clampi(t["height"] + delta, MIN_HEIGHT, MAX_HEIGHT)
-			_field.set_tile(tile.x, tile.y, new_h, t["type"], t["body"], t.get("bottom", t["body"]))
-		Tool.PAINT:
-			if primary:
-				_paint_face(tile, t, pick["face"])
-
-
-## Paint `_active_type` onto the clicked `face` of tile (x, z), leaving its other faces
-## untouched. TOP sets the surface type, BOTTOM the underside type, and any of the four
-## sides the (shared) body type. This match is the single place "clicked face → which
-## layer" lives — it's what grows when N/S/E/W become independently typed (each side
-## would target its own field instead of all sharing `body`).
-func _paint_face(tile: Vector2i, t: Dictionary, face: int) -> void:
+	_push_undo()
 	var bottom: int = t.get("bottom", t["body"])
 	match face:
 		TileFaces.Face.TOP:
@@ -255,6 +339,245 @@ func _paint_face(tile: Vector2i, t: Dictionary, face: int) -> void:
 			_field.set_tile(tile.x, tile.y, t["height"], t["type"], _active_type, bottom)
 
 
+# --- Brush drag engine ------------------------------------------------------
+
+## Open a drag session on a left press over `tile`. Snapshots the whole state so every later
+## frame can re-derive the edit from the original terrain (see the `_drag_*` block). Applies
+## the initial footprint immediately (delta 0), so a press already shows the brush in place.
+func _begin_drag(tile: Vector2i) -> void:
+	if tile == Battlefield.INVALID_TILE:
+		return
+	_push_undo()   # one undo step for the whole stroke (snapshot before it lands)
+	_dragging = true
+	_drag_start_tile = tile
+	_drag_start_y = get_viewport().get_mouse_position().y
+	_drag_levels = 0
+	_drag_base = _snapshot_state()
+	_drag_last_footprint = []
+	_update_drag(tile)
+
+
+## Re-derive and apply the drag's edit for the current hovered `tile`. Vertical mouse travel
+## since the press becomes a height delta (up = raise); the rest of the footprint follows the
+## brush. Called every frame while dragging.
+func _update_drag(tile: Vector2i) -> void:
+	_drag_levels = int(round((_drag_start_y - get_viewport().get_mouse_position().y) / DRAG_PX_PER_LEVEL))
+	var edits := _build_drag_edits(tile)
+	_apply_drag_edits(edits)
+	# Preview the footprint over whatever the edit just touched (tops, post-edit heights).
+	var footprint: Array = []
+	for e in edits:
+		footprint.append(Vector2i(e["x"], e["z"]))
+	_field.show_footprint(footprint, HOVER_COLOR)
+
+
+## Finish the drag. A press-and-release with no vertical movement reads as a plain CLICK: for
+## the height-style brushes that means apply the discrete default (a Hill stamps a dome of
+## height = brush size; the others nudge +1), matching the old single-click feel. Paint/Line
+## already applied on press, so they need nothing extra.
+func _end_drag() -> void:
+	if _is_height_step_brush() and _drag_levels == 0:
+		_drag_levels = _brush_size if _brush == Brush.HILL else 1
+		_apply_drag_edits(_build_drag_edits(_drag_start_tile))
+	_dragging = false
+	_drag_last_footprint = []
+	_field.clear_footprint()
+
+
+## Whether the active brush edits HEIGHT on a click (so a no-drag click should apply a discrete
+## step): any HILL, or a HEIGHT-tool brush that isn't LINE (LINE flattens regardless of drag).
+func _is_height_step_brush() -> bool:
+	if _brush == Brush.HILL:
+		return true
+	return _tool == Tool.HEIGHT and _brush != Brush.LINE
+
+
+## A one-shot right-click: lower (HEIGHT brushes) or dig a bowl (HILL) under `tile`, by one
+## step / one brush-size, read straight from the current state (no drag snapshot). Paint and
+## Line ignore right-click — there's no "un-paint", and a line needs a drag to have length.
+func _apply_secondary(tile: Vector2i) -> void:
+	if tile == Battlefield.INVALID_TILE:
+		return
+	var center := _field.tile_data(tile.x, tile.y)
+	if center.is_empty():
+		return
+	var edits: Array = []
+	if _brush == Brush.HILL:
+		# Dig a bowl: a downward dome (negative peak = -brush size) sunk from the center tile.
+		# Source reads live tile data (no drag snapshot here), wrapped to take a Vector2i.
+		edits = _dome_edits(tile, center["height"], -_brush_size, func(t: Vector2i) -> Dictionary: return _field.tile_data(t.x, t.y))
+	elif _tool == Tool.HEIGHT and _brush != Brush.LINE:
+		for t in _brush_footprint(tile):
+			var d := _field.tile_data(t.x, t.y)
+			if d.is_empty():
+				continue
+			edits.append(_tile_edit(t, clampi(d["height"] - 1, MIN_HEIGHT, MAX_HEIGHT), d["type"], d["body"], d.get("bottom", d["body"])))
+	if not edits.is_empty():
+		_push_undo()
+		_field.set_tiles(edits)
+
+
+# --- Drag edit construction -------------------------------------------------
+
+## Build the complete tile-edit list for the current drag state, hovering `tile`. Reads the
+## pre-drag snapshot (`_drag_base`) as the source so the edit never compounds. Routes by brush:
+## HILL → falloff dome; LINE → painted/flattened line; the rest → footprint paint or height
+## shift. Each entry is a full `{x,z,height,type,body,bottom}` dict for `set_tiles`.
+func _build_drag_edits(tile: Vector2i) -> Array:
+	if _brush == Brush.HILL:
+		var c := _base_tile(_drag_start_tile)
+		return _dome_edits(_drag_start_tile, c["height"], _drag_levels, _base_tile)
+	var edits: Array = []
+	for t in _drag_footprint(tile):
+		var b := _base_tile(t)
+		if b.is_empty():
+			continue
+		var bottom: int = b.get("bottom", b["body"])
+		if _tool == Tool.PAINT:
+			edits.append(_tile_edit(t, b["height"], _active_type, b["body"], bottom))
+		elif _brush == Brush.LINE:
+			# Flatten the line to the height the drag STARTED on (level a path across bumps).
+			var flat: int = _base_tile(_drag_start_tile)["height"]
+			edits.append(_tile_edit(t, flat, b["type"], b["body"], bottom))
+		else:
+			edits.append(_tile_edit(t, clampi(b["height"] + _drag_levels, MIN_HEIGHT, MAX_HEIGHT), b["type"], b["body"], bottom))
+	return edits
+
+
+## The dome/bowl edit set centered on `center`, raising each tile toward `base_h + peak` with a
+## linear falloff to the rim (radius = brush size). `peak` can be negative (a bowl). `source` is
+## the read function for each tile's other layers (`_base_tile` while dragging, `tile_data` for
+## the right-click dig) so the dome preserves surface/body/bottom. Tiles read from the disc.
+func _dome_edits(center: Vector2i, base_h: int, peak: int, source: Callable) -> Array:
+	var edits: Array = []
+	var radius := float(_brush_size + 1)   # +1 so the rim tile still gets a sliver, not zero
+	for t in _disc_tiles(center, _brush_size):
+		var src: Dictionary = source.call(t)
+		if src.is_empty():
+			continue
+		var dist := Vector2(t.x - center.x, t.y - center.y).length()
+		# Linear falloff: full peak at the center, fading to ~0 at the rim. round() keeps it
+		# on the integer height grid; a negative peak digs symmetrically.
+		var contrib := int(round(peak * (1.0 - dist / radius)))
+		var target := clampi(base_h + contrib, MIN_HEIGHT, MAX_HEIGHT)
+		edits.append(_tile_edit(t, target, src["type"], src["body"], src.get("bottom", src["body"])))
+	return edits
+
+
+## Apply a drag's `edits` in ONE redraw, first restoring any tile that was in the LAST applied
+## footprint but isn't now — so scrubbing a line shorter or sliding a paint brush leaves no
+## trail. Restored values come from the pre-drag snapshot. Records the new footprint.
+func _apply_drag_edits(edits: Array) -> void:
+	var new_keys := {}
+	for e in edits:
+		new_keys[Vector2i(e["x"], e["z"])] = true
+	var batch: Array = []
+	for t in _drag_last_footprint:
+		var tile: Vector2i = t
+		if not new_keys.has(tile):
+			var b := _base_tile(tile)
+			batch.append(_tile_edit(tile, b["height"], b["type"], b["body"], b.get("bottom", b["body"])))
+	batch.append_array(edits)
+	_field.set_tiles(batch)
+	_drag_last_footprint = new_keys.keys()
+
+
+# --- Brush footprint geometry -----------------------------------------------
+
+## The footprint for the HOVER cursor at `center` (not dragging): a single tile for SINGLE and
+## LINE (a line has no length until you drag), otherwise the brush's full shape.
+func _brush_footprint(center: Vector2i) -> Array:
+	match _brush:
+		Brush.SQUARE:
+			return _square_tiles(center, _brush_size)
+		Brush.CIRCLE, Brush.HILL:
+			return _disc_tiles(center, _brush_size)
+		_:
+			return [center]   # SINGLE, LINE
+
+
+## The footprint during a DRAG hovering `tile`. LINE spans press→hover; the height brushes stay
+## anchored at the press tile (so vertical drag doesn't drag the shape around), while PAINT
+## brushes follow the cursor so you can paint a swath as you move.
+func _drag_footprint(tile: Vector2i) -> Array:
+	if _brush == Brush.LINE:
+		return _line_tiles(_drag_start_tile, tile)
+	if _tool == Tool.PAINT and tile != Battlefield.INVALID_TILE:
+		return _brush_footprint(tile)
+	return _brush_footprint(_drag_start_tile)
+
+
+## All tiles within Chebyshev (chessboard) distance `r` of center — a (2r+1)² square.
+func _square_tiles(center: Vector2i, r: int) -> Array:
+	var tiles: Array = []
+	for dx in range(-r, r + 1):
+		for dz in range(-r, r + 1):
+			tiles.append(Vector2i(center.x + dx, center.y + dz))
+	return tiles
+
+
+## All tiles within Euclidean distance `r` (+½ so the rim reads round, not clipped) — a disc.
+func _disc_tiles(center: Vector2i, r: int) -> Array:
+	var tiles: Array = []
+	var limit := (r + 0.5) * (r + 0.5)
+	for dx in range(-r, r + 1):
+		for dz in range(-r, r + 1):
+			if dx * dx + dz * dz <= limit:
+				tiles.append(Vector2i(center.x + dx, center.y + dz))
+	return tiles
+
+
+## The 1-wide tile line from `a` to `b` (Bresenham). Used by the LINE brush while dragging.
+func _line_tiles(a: Vector2i, b: Vector2i) -> Array:
+	var tiles: Array = []
+	var x := a.x
+	var z := a.y
+	var dx := absi(b.x - a.x)
+	var dz := absi(b.y - a.y)
+	var sx := 1 if b.x > a.x else -1
+	var sz := 1 if b.y > a.y else -1
+	var err := dx - dz
+	while true:
+		tiles.append(Vector2i(x, z))
+		if x == b.x and z == b.y:
+			break
+		var e2 := 2 * err
+		if e2 > -dz:
+			err -= dz
+			x += sx
+		if e2 < dx:
+			err += dx
+			z += sz
+	return tiles
+
+
+# --- Drag snapshot helpers --------------------------------------------------
+
+## A deep copy of the current state's tile dicts, so a drag can restore from it without the
+## live edits aliasing back into the snapshot. Indexed `[x][z]`.
+func _snapshot_state() -> Array:
+	var snap: Array = []
+	for column in _field.current_state():
+		var col: Array = []
+		for t in column:
+			col.append((t as Dictionary).duplicate())
+		snap.append(col)
+	return snap
+
+
+## The pre-drag snapshot tile at (x, z); empty dict if off-grid. Matches `tile_data`'s shape so
+## the two are interchangeable as a `source` Callable for `_dome_edits`.
+func _base_tile(tile: Vector2i) -> Dictionary:
+	if tile.x < 0 or tile.x >= _field.grid_width or tile.y < 0 or tile.y >= _field.grid_height:
+		return {}
+	return _drag_base[tile.x][tile.y]
+
+
+## A `set_tiles` edit entry — the one place the dict shape is spelled out.
+func _tile_edit(tile: Vector2i, height: int, type: int, body: int, bottom: int) -> Dictionary:
+	return {"x": tile.x, "z": tile.y, "height": height, "type": type, "body": body, "bottom": bottom}
+
+
 ## Grow or shrink the map at the hovered edge `tile`. Left-click (`primary`) ADDS a
 ## row/column on every side the tile touches (two for a corner); right-click DELETES
 ## them. A delete that would leave the map smaller than 1 tile is refused. No-op on an
@@ -263,10 +586,15 @@ func _apply_resize(tile: Vector2i, primary: bool) -> void:
 	var sides := _field.sides_at(tile.x, tile.y)
 	if sides.is_empty():
 		return   # interior tile — nothing to resize from here
+	_push_undo()
+	var changed := true
 	if primary:
 		_field.grow_sides(sides)
 	elif not _field.shrink_sides(sides):
 		print("MapDesigner: can't shrink — map already at its minimum size")
+		changed = false
+	if not changed:
+		_undo_stack.pop_back()   # the shrink was refused — discard the unused snapshot
 	_field.clear_resize_preview()   # the edit recentered the grid; recompute next hover
 	_refresh_label()
 
@@ -302,6 +630,44 @@ func _new_flat_states(w: int, h: int) -> Array:
 	return [grid]
 
 
+# --- Undo -------------------------------------------------------------------
+
+## Capture the current map (all states + name) onto the undo ring, dropping the oldest if the
+## ring is full. Call this BEFORE applying a change so the snapshot is the pre-edit state.
+func _push_undo() -> void:
+	_undo_stack.append({"states": _clone_states(_field.states), "name": _map_name})
+	if _undo_stack.size() > UNDO_DEPTH:
+		_undo_stack.pop_front()
+
+
+## Restore the most recent snapshot (name + states), rebuilding the field. No-op (with a note)
+## when the history is empty. Undo is one-directional for now — no redo.
+func _undo() -> void:
+	if _undo_stack.is_empty():
+		print("MapDesigner: nothing to undo")
+		return
+	var snap: Dictionary = _undo_stack.pop_back()
+	_map_name = snap["name"]
+	_field.load_states(snap["states"])
+	_refresh_label()
+	print("MapDesigner: undo (%d left)" % _undo_stack.size())
+
+
+## A deep copy of a whole `states` stack (every grid → every column → every tile dict), so a
+## snapshot can't be aliased by later in-place edits. The nested form `load_states` consumes.
+func _clone_states(states: Array) -> Array:
+	var out: Array = []
+	for grid in states:
+		var g: Array = []
+		for column in grid:
+			var c: Array = []
+			for t in column:
+				c.append((t as Dictionary).duplicate())
+			g.append(c)
+		out.append(g)
+	return out
+
+
 # --- Save / load ------------------------------------------------------------
 
 ## Pack the field's current state into a MapData and write it to `path`.
@@ -319,6 +685,7 @@ func _on_load_path_chosen(path: String) -> void:
 	if data == null:
 		print("MapDesigner: failed to load ", path)
 		return
+	_push_undo()   # loading replaces the map — keep the previous one undoable
 	_map_name = data.map_name
 	_field.load_states(data.to_states())
 	print("MapDesigner: loaded '%s' (%dx%d) from %s" % [_map_name, data.width, data.height, path])
@@ -532,6 +899,7 @@ func _make_spin(value: int) -> SpinBox:
 
 ## Create a fresh flat map at the chosen size + name, discarding the current one.
 func _on_new_confirmed() -> void:
+	_push_undo()   # an accidental New is undoable (restores the old map + name)
 	var w := int(_new_width_spin.value)
 	var h := int(_new_height_spin.value)
 	_map_name = _clean_name(_new_name_edit.text)
@@ -541,6 +909,7 @@ func _on_new_confirmed() -> void:
 
 ## Apply the typed name to the current map (tiles untouched).
 func _on_rename_confirmed() -> void:
+	_push_undo()   # a rename is undoable too (the snapshot carries the old name)
 	_map_name = _clean_name(_rename_edit.text)
 	_refresh_label()
 
@@ -565,12 +934,14 @@ func _refresh_label() -> void:
 	_label.text = "\n".join([
 		"MAP DESIGNER  —  %s  (%dx%d)" % [_map_name, w, h],
 		"Tool: %s            [Tab] cycle tool" % Tool.keys()[_tool],
+		"Brush: %s (size %d)   [B] cycle brush, - / = size" % [Brush.keys()[_brush], _brush_size],
 		"Type: %s            [ and ] cycle, 1-0 quick-pick" % TileTypes.Type.keys()[_active_type],
 		"",
-		"HEIGHT tool: L-click raise, R-click lower",
-		"PAINT tool: L-click paints the active type on the clicked FACE",
-		"   top=surface, sides=body, underside=bottom (orbit under the map to reach it)",
+		"HEIGHT tool: L-click raise / drag up-down to set, R-click lower",
+		"PAINT tool: L-click paints the active type over the brush footprint",
+		"   (SINGLE brush is face-aware: top=surface, sides=body, underside=bottom)",
+		"Brushes: SINGLE / SQUARE / CIRCLE / LINE (drag) / HILL (drag up=hill, down=valley)",
 		"RESIZE tool: hover an edge — L-click adds, R-click deletes (corner = both sides)",
 		"Camera: wheel zoom, Q/E orbit, middle-drag free-orbit (drag down to go under)",
-		"[N] new   [R] rename   [S] save   [L] load",
+		"[U] undo (last %d)   [N] new   [R] rename   [S] save   [L] load" % UNDO_DEPTH,
 	])

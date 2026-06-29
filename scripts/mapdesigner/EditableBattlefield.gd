@@ -435,6 +435,62 @@ func clear_hover_face() -> void:
 		_hover_marker.visible = false
 
 
+# --- Brush footprint preview (designer Phase 2 brushes) ---------------------
+
+## Translucent top-face quads, one per tile, laid over a brush's footprint so the user
+## can SEE which tiles a Square/Circle/Line/Hill brush will touch before committing — the
+## multi-tile cousin of the single-tile `set_hover_face` cursor. Same grown-on-demand pool /
+## hide-leftovers pattern as the resize overlays; lazily built on first use.
+var _footprint_pool: Array[MeshInstance3D] = []
+var _footprint_mesh: PlaneMesh
+var _footprint_material: StandardMaterial3D
+
+## Lift the footprint quad a hair above each tile's cap (matches the resize delete decal).
+const _FOOTPRINT_LIFT := 0.05
+
+
+## Highlight every tile in `tiles` (grid coords) with a translucent `color` quad on its top
+## surface — the brush footprint preview. Off-grid coords are skipped. Reuses/grows a pool and
+## hides any leftover quads from a larger previous footprint, so it never reallocates per frame.
+func show_footprint(tiles: Array, color: Color) -> void:
+	if _footprint_material == null:
+		_footprint_mesh = PlaneMesh.new()
+		_footprint_mesh.size = Vector2(tile_size * 0.92, tile_size * 0.92)
+		_footprint_material = StandardMaterial3D.new()
+		_footprint_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_footprint_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_footprint_material.albedo_color = color
+	var shown := 0
+	for t in tiles:
+		var tile: Vector2i = t
+		if not _in_bounds(tile.x, tile.y):
+			continue
+		var q := _claim_footprint(shown)
+		q.position = tile_to_world(tile.x, tile.y) + Vector3(0.0, _FOOTPRINT_LIFT, 0.0)
+		q.visible = true
+		shown += 1
+	for i in range(shown, _footprint_pool.size()):
+		_footprint_pool[i].visible = false
+
+
+## Hide the whole footprint preview.
+func clear_footprint() -> void:
+	for q in _footprint_pool:
+		q.visible = false
+
+
+## Grow the footprint-quad pool until it has a quad at `i`, then return it.
+func _claim_footprint(i: int) -> MeshInstance3D:
+	while i >= _footprint_pool.size():
+		var m := MeshInstance3D.new()
+		m.mesh = _footprint_mesh
+		m.material_override = _footprint_material
+		m.visible = false
+		add_child(m)
+		_footprint_pool.append(m)
+	return _footprint_pool[i]
+
+
 ## Lay green ghost boxes one tile beyond each added side (plus the diagonal corner box
 ## when two orthogonal sides are added), each scaled to the height of the edge tile it
 ## mirrors, so the preview looks like the terrain extended outward.
