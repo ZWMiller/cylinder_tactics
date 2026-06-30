@@ -126,6 +126,14 @@ var states: Array = []
 ## Index into `states` of the state currently being displayed.
 var _current_index: int = 0
 
+## Whether this map authors its column undersides independently of the tops — the SCULPTED depth
+## mode (`MapData.DepthMode`). False (AUTO, the default) means the underside is derived from the
+## neighbours in `_column_bottom_in`, exactly as it always was; true means each column is drawn
+## `[floor, top]` from the per-tile authored `floor` level. Adopted from `map_data` in `_ready`;
+## procedurally-built maps (DemoMap / an assigned `states`) stay AUTO. The map designer flips it
+## directly via `set_sculpted_depth` (its `EditableBattlefield` has no `map_data`).
+var _sculpted_depth: bool = false
+
 # --- Time-shift cascade runtime (set up in _begin_shift_animation, ticked in _process) ----
 
 ## Fired when a shift's cascade morph has fully played out and the map is rendered in its new state.
@@ -156,6 +164,12 @@ var _shift_dur: Array = []
 ## Scratch per-frame grid of each tile's interpolated height LEVEL (float), filled before drawing so a
 ## tile's neighbour-aware column depth reads the neighbours' *animating* heights (cliffs morph too).
 var _anim_level: Array = []
+
+## Scratch per-frame grid of each tile's interpolated FLOOR level (float). Only used in SCULPTED
+## depth mode, where the bottom is authored and so must morph across a time-shift in its own right
+## (the time-degradation gimmick reshapes the underside too, not just the top). Parallel to
+## `_anim_level`; left untouched (and unread) on Auto maps, whose bottom is derived from neighbours.
+var _anim_floor: Array = []
 
 ## A single 1x1x1 box mesh shared by every tile instance. We never resize the
 ## mesh itself — each tile's MeshInstance3D is *scaled* to the size it needs.
@@ -296,6 +310,8 @@ func _ready() -> void:
 	# then the built-in SmallDemoMap so the scene always shows something on F5.
 	if map_data != null:
 		states = map_data.to_states()
+		# A saved map carries its own depth mode; procedural fallbacks stay AUTO (derived underside).
+		_sculpted_depth = map_data.depth_mode == MapData.DepthMode.SCULPTED
 	elif states.is_empty():
 		states = SmallDemoMap.generate(grid_width, grid_height)
 
@@ -364,14 +380,21 @@ func _begin_shift_animation(from_state: Array, to_state: Array) -> void:
 	_shift_start = []
 	_shift_dur = []
 	_anim_level = []
+	_anim_floor = []
 	for x in grid_width:
 		var start_col: Array = []
 		var dur_col: Array = []
 		var level_col: Array = []
+		var floor_col: Array = []
 		for z in grid_height:
 			var from_tile: Dictionary = from_state[x][z]
 			var to_tile: Dictionary = to_state[x][z]
 			var dh: int = abs(to_tile["height"] - from_tile["height"])
+			# In Sculpted mode the authored floor also moves, so pace the morph by whichever face
+			# (top or bottom) travels further — a tile whose floor alone changes still animates.
+			if _sculpted_depth:
+				var df: int = abs(_floor_of(to_tile) - _floor_of(from_tile))
+				dh = maxi(dh, df)
 			var dur: float = dh * shift_frames_per_level
 			if _tile_color_changes(from_tile, to_tile):
 				dur = maxf(dur, shift_color_morph_frames)
@@ -379,10 +402,12 @@ func _begin_shift_animation(from_state: Array, to_state: Array) -> void:
 			start_col.append(start)
 			dur_col.append(dur)
 			level_col.append(float(from_tile["height"]))   # seed at FROM so frame 0 looks unchanged
+			floor_col.append(float(_floor_of(from_tile)))
 			_shift_total = maxf(_shift_total, start + dur)
 		_shift_start.append(start_col)
 		_shift_dur.append(dur_col)
 		_anim_level.append(level_col)
+		_anim_floor.append(floor_col)
 	if _shift_total <= 0.0:
 		_finish_shift_animation()   # nothing changed — snap to the new state and announce
 		return
@@ -411,6 +436,9 @@ func _process(delta: float) -> void:
 		for z in grid_height:
 			var t := _tile_progress(x, z)
 			_anim_level[x][z] = lerpf(float(_shift_from[x][z]["height"]), float(_shift_to[x][z]["height"]), t)
+			# Morph the authored floor too (Sculpted only — Auto derives the bottom each frame).
+			if _sculpted_depth:
+				_anim_floor[x][z] = lerpf(float(_floor_of(_shift_from[x][z])), float(_floor_of(_shift_to[x][z])), t)
 	for x in grid_width:
 		for z in grid_height:
 			_draw_shift_tile(x, z)
@@ -440,16 +468,21 @@ func _draw_shift_tile(x: int, z: int) -> void:
 	var recess := lerpf(_recess_for(from_tile["type"]), _recess_for(to_tile["type"]), t)
 	var surface_top: float = own_top - recess
 
-	# Column underside from the lowest animating neighbour (mirrors `_column_bottom_in` on floats), so
-	# the cliff faces between tiles at different heights grow/shrink through the morph.
-	var lowest: float = own_top
-	for dir in _ORTHO_DIRS:
-		var d: Vector2i = dir
-		var nx: int = x + d.x
-		var nz: int = z + d.y
-		if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
-			lowest = minf(lowest, _anim_level[nx][nz] * height_step)
-	var base_y: float = lowest if lowest < own_top else own_top - float(min_body_depth) * height_step
+	# Column underside. SCULPTED: the authored floor, morphing in its own right (mirrors
+	# `_column_bottom_in`'s sculpted branch on the animating value). AUTO: the lowest animating
+	# neighbour (mirrors the derived branch on floats), so cliff faces grow/shrink through the morph.
+	var base_y: float
+	if _sculpted_depth:
+		base_y = _anim_floor[x][z] * height_step
+	else:
+		var lowest: float = own_top
+		for dir in _ORTHO_DIRS:
+			var d: Vector2i = dir
+			var nx: int = x + d.x
+			var nz: int = z + d.y
+			if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
+				lowest = minf(lowest, _anim_level[nx][nz] * height_step)
+		base_y = lowest if lowest < own_top else own_top - float(min_body_depth) * height_step
 
 	var refs: Dictionary = _tiles[x][z]
 	var body_mat := _anim_material(refs, "body_mat", from_tile, to_tile, TileFaces.Face.NORTH, t)
@@ -462,6 +495,13 @@ func _draw_shift_tile(x: int, z: int) -> void:
 ## drops; lerped during a morph so water "fills in" as a tile becomes liquid.
 func _recess_for(type: int) -> float:
 	return liquid_recess if TileTypes.is_liquid(type) else 0.0
+
+
+## A tile's authored bottom LEVEL (Sculpted mode), defaulting to one level below its top when the
+## tile carries no `floor` (Auto/legacy data). One accessor so the shift cascade and the column
+## drawer agree on the value. Only consulted in Sculpted mode.
+func _floor_of(tile: Dictionary) -> int:
+	return tile.get("floor", tile["height"] - 1)
 
 
 ## Get (creating once, cached in the tile's `refs`) a per-tile morph material for `key`, set to the
@@ -505,6 +545,25 @@ func tile_height(x: int, z: int) -> float:
 ## camera all build on this.
 func tile_to_world(x: int, z: int) -> Vector3:
 	return Vector3(_grid_to_world_x(x), _surface_world_y(current_state(), x, z), _grid_to_world_z(z))
+
+
+## World-space center the camera should look at to frame the WHOLE map centered. X and Z are
+## the origin (the grid is centered there by `_grid_to_world_x/z`), but Y is NOT zero: it's the
+## midpoint between the lowest and highest visible tile surface in the current state. The grid is
+## only centered on origin in the ground plane — a map authored high up (the designer's tiles
+## start at height level 20, i.e. world y≈10) would otherwise float well above a fixed y=0 look-at,
+## reading as "off-center up". Callers (the designer camera) target this so framing tracks the
+## actual terrain height band instead of assuming the ground sits at y=0.
+func grid_center_world() -> Vector3:
+	var state := current_state()
+	var lo := INF
+	var hi := -INF
+	for x in grid_width:
+		for z in grid_height:
+			var y := _surface_world_y(state, x, z)
+			lo = minf(lo, y)
+			hi = maxf(hi, y)
+	return Vector3(0.0, (lo + hi) * 0.5, 0.0)
 
 
 ## Where a UNIT'S origin rests when standing on tile (x, z): the visible surface, dropped a further
@@ -553,6 +612,17 @@ func column_bottom(x: int, z: int) -> float:
 	return _column_bottom_in(current_state(), x, z)
 
 
+## Whether this map is in SCULPTED depth mode (authored undersides). See `_sculpted_depth`.
+func is_sculpted_depth() -> bool:
+	return _sculpted_depth
+
+
+## Switch the depth mode (the designer's convert action calls this; battles use the value adopted
+## from `map_data`). Caller is responsible for re-rendering — `EditableBattlefield` redraws after.
+func set_sculpted_depth(sculpted: bool) -> void:
+	_sculpted_depth = sculpted
+
+
 ## World Y of a tile's column underside within a given `state` (used by `render_state`,
 ## which draws an arbitrary state, and by `column_bottom` for the current one).
 ##
@@ -562,14 +632,28 @@ func column_bottom(x: int, z: int) -> float:
 ## or the map edge — off-grid neighbours are treated as no cliff), it falls back to a thin
 ## `min_body_depth`-level slab so the tile isn't paper-thin.
 func _column_bottom_in(state: Array, x: int, z: int) -> float:
-	var top: float = state[x][z]["height"] * height_step
+	# SCULPTED maps author the bottom outright: each column is exactly [floor, top], with no
+	# neighbour derivation (so deliberate gaps / floating slabs are kept, not filled). The floor is
+	# an integer level like `height`; world it the same way. Auto maps fall through to the derived
+	# logic below.
+	if _sculpted_depth:
+		return state[x][z].get("floor", state[x][z]["height"] - 1) * height_step
+	# Work in VISIBLE-surface space for BOTH this tile and its neighbours (not integer rims). A
+	# liquid cap sits `liquid_recess` below its rim (see `_surface_world_y`); comparing recessed
+	# neighbours against an integer-rim own-top invented a false `liquid_recess` cliff, so a flat
+	# field of equal-height liquid (e.g. a square-brushed pool) collapsed every column to ~0
+	# height. Using each tile's own visible surface keeps a flat liquid field flush (no false
+	# cliff → thin-slab fallback) while still extending a solid wall the extra recess down to meet
+	# a lower liquid neighbour's waterline. For solid tiles `_surface_world_y` == the rim, so
+	# solid-to-solid behaviour is unchanged.
+	var top: float = _surface_world_y(state, x, z)
 	var lowest: float = top
 	for dir in _ORTHO_DIRS:
 		var d: Vector2i = dir
 		var nx: int = x + d.x
 		var nz: int = z + d.y
 		if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
-			var nt: float = state[nx][nz]["height"] * height_step
+			var nt: float = _surface_world_y(state, nx, nz)
 			if nt < lowest:
 				lowest = nt
 	if lowest < top:

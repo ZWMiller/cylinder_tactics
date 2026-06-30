@@ -17,6 +17,16 @@
 class_name EditableBattlefield
 extends Battlefield
 
+## Sentinel for `set_tile`/`_write_tile`'s `floor_level` meaning "keep the tile's current floor"
+## (so an edit that only changes surface/body/bottom leaves an authored Sculpted underside alone).
+## A sentinel rather than a magic number because every real floor level (including 0 and negatives)
+## is valid; -2³¹ is safely outside any authored range.
+const _KEEP_FLOOR := -2147483648
+
+## Twin sentinel for the seam `anchor` (see MapState.anchors): "keep the tile's current anchor", so a
+## normal edit (paint, top/floor move) never resets the fixed seam — only New / convert / resize do.
+const _KEEP_ANCHOR := -2147483648
+
 ## Designer-only grid overlay: a thin dark line around every tile's top edge, so tiles
 ## (and height steps) read clearly despite sharing a flat surface color. Rebuilt after
 ## every render because changing a tile's height moves its outline. Lives here, not in
@@ -117,8 +127,8 @@ func tile_data(x: int, z: int) -> Dictionary:
 ## types, then redraw. `bottom_type < 0` means "inherit the body color" (the default for a
 ## tile whose underside isn't deliberately authored). Redrawing the whole (small) designer
 ## state per edit is cheap; brush strokes that touch many tiles should use `set_tiles`.
-func set_tile(x: int, z: int, height: int, surface_type: int, body_type: int, bottom_type: int = -1) -> void:
-	if not _write_tile(x, z, height, surface_type, body_type, bottom_type):
+func set_tile(x: int, z: int, height: int, surface_type: int, body_type: int, bottom_type: int = -1, floor_level: int = _KEEP_FLOOR, anchor_level: int = _KEEP_ANCHOR) -> void:
+	if not _write_tile(x, z, height, surface_type, body_type, bottom_type, floor_level, anchor_level):
 		return
 	render_state(_current_index)
 
@@ -130,7 +140,7 @@ func set_tile(x: int, z: int, height: int, surface_type: int, body_type: int, bo
 func set_tiles(edits: Array) -> void:
 	var any := false
 	for e in edits:
-		if _write_tile(e["x"], e["z"], e["height"], e["type"], e["body"], e.get("bottom", -1)):
+		if _write_tile(e["x"], e["z"], e["height"], e["type"], e["body"], e.get("bottom", -1), e.get("floor", _KEEP_FLOOR), e.get("anchor", _KEEP_ANCHOR)):
 			any = true
 	if any:
 		render_state(_current_index)
@@ -142,6 +152,38 @@ func redraw() -> void:
 	render_state(_current_index)
 
 
+## Seed the Sculpted layers from the current Auto map — the Auto→Sculpted conversion. Each tile's
+## `floor` is baked to what Auto was drawing (the lowest-neighbour level, else the thin-slab minimum)
+## so the undersides don't jump, and its seam `anchor` is set to its current top (the seam starts at
+## the present surface, so from here the top can only rise and the floor only sink). Runs over EVERY
+## state (a multi-state map stays consistent), editing the tile dicts in place — the caller flips the
+## mode and redraws. Integer-level: the cosmetic liquid recess is sub-level and intentionally not baked.
+func seed_sculpt_from_derived() -> void:
+	for state in states:
+		for x in grid_width:
+			for z in grid_height:
+				state[x][z]["floor"] = _derived_floor_level(state, x, z)
+				state[x][z]["anchor"] = state[x][z]["height"]
+
+
+## The integer floor LEVEL Auto mode would draw for tile (x, z) in `state`: the lowest orthogonal
+## neighbour's top if any neighbour is lower (cover the cliff), else `top - min_body_depth` (the
+## thin-slab minimum on flat ground / the border). The integer-level twin of `Battlefield`'s
+## `_column_bottom_in` Auto branch, used only by `seed_sculpt_from_derived`.
+func _derived_floor_level(state: Array, x: int, z: int) -> int:
+	var top: int = state[x][z]["height"]
+	var lowest: int = top
+	for dir in _ORTHO_DIRS:
+		var d: Vector2i = dir
+		var nx: int = x + d.x
+		var nz: int = z + d.y
+		if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
+			lowest = mini(lowest, state[nx][nz]["height"])
+	if lowest < top:
+		return lowest
+	return top - min_body_depth
+
+
 # --- internal ---------------------------------------------------------------
 
 ## Write one tile's data into the current state WITHOUT redrawing. Returns whether the
@@ -149,11 +191,22 @@ func redraw() -> void:
 ## always present and consistent. `bottom_type < 0` inherits the body color, so callers
 ## that don't care about the underside (height/surface/body tools, brushes) leave it to
 ## match the sides — the default for an unauthored underside (see TileFaces.face_type).
-func _write_tile(x: int, z: int, height: int, surface_type: int, body_type: int, bottom_type: int = -1) -> bool:
+func _write_tile(x: int, z: int, height: int, surface_type: int, body_type: int, bottom_type: int = -1, floor_level: int = _KEEP_FLOOR, anchor_level: int = _KEEP_ANCHOR) -> bool:
 	if not _in_bounds(x, z):
 		return false
 	var bottom: int = bottom_type if bottom_type >= 0 else body_type
-	current_state()[x][z] = {"height": height, "type": surface_type, "body": body_type, "bottom": bottom}
+	# Preserve the existing floor when the caller passes the keep-sentinel — so a paint that only
+	# touches surface/body/bottom never disturbs an authored (Sculpted) underside. A sentinel rather
+	# than a magic 0 because floor 0 (ground level) is a legal authored value. Default a tile that
+	# has no floor yet to one level below its top (a 1-thick slab).
+	var floor_val: int = floor_level
+	if floor_val == _KEEP_FLOOR:
+		floor_val = current_state()[x][z].get("floor", height - 1)
+	# Same keep-sentinel for the fixed seam anchor; default a brand-new tile's anchor to its top.
+	var anchor_val: int = anchor_level
+	if anchor_val == _KEEP_ANCHOR:
+		anchor_val = current_state()[x][z].get("anchor", height)
+	current_state()[x][z] = {"height": height, "type": surface_type, "body": body_type, "bottom": bottom, "floor": floor_val, "anchor": anchor_val}
 	return true
 
 
@@ -241,9 +294,19 @@ func _rebuild_grid_overlay() -> void:
 				var nz: int = z + d.y
 				var neighbour_top := bb   # off-grid border: face is exposed only to the slab bottom
 				if nx >= 0 and nx < grid_width and nz >= 0 and nz < grid_height:
-					neighbour_top = state[nx][nz]["height"] * height_step
+					# Visible surface, not the integer rim, so the post bottom meets the mesh wall —
+					# which now drops to a liquid neighbour's recessed waterline (see Battlefield
+					# `_column_bottom_in`). For solid neighbours this is the same rim value.
+					neighbour_top = _surface_world_y(state, nx, nz)
 				if top - neighbour_top <= 0.001:
 					continue   # flush with (or lower than) the neighbour — no exposed face
+				# The exposed face only spans the part of THIS column that actually exists, so its
+				# bottom is the higher of the neighbour's top and this column's own underside. In Auto
+				# mode `bb` is always ≤ the neighbour (the column drops to cover the cliff), so this is
+				# just `neighbour_top`; in Sculpted mode a FLOATING slab (floor above the neighbour)
+				# correctly starts its outline at the slab's floor instead of drawing down through the
+				# open gap below it.
+				var face_bottom := maxf(neighbour_top, bb)
 				# True (un-nudged) edge midpoint + its two corners along the edge, where
 				# perp = (dir.y, dir.x) runs perpendicular to dir. The nudge is applied later,
 				# after merging, so it can follow the summed normal.
@@ -251,8 +314,8 @@ func _rebuild_grid_overlay() -> void:
 				var mz := c.z + d.y * half
 				var px := d.y * half
 				var pz := d.x * half
-				_add_post(posts, mx + px, mz + pz, neighbour_top, top, d)
-				_add_post(posts, mx - px, mz - pz, neighbour_top, top, d)
+				_add_post(posts, mx + px, mz + pz, face_bottom, top, d)
+				_add_post(posts, mx - px, mz - pz, face_bottom, top, d)
 
 	# Emit one line per merged post, nudged outward along the summed face normal so it floats
 	# just in front of the column(s) instead of z-fighting on the exact corner.
@@ -395,7 +458,16 @@ func set_hover_face(tile: Vector2i, face: int, color: Color) -> void:
 		_hover_marker.material_override = _hover_material
 		add_child(_hover_marker)
 	_hover_material.albedo_color = color
+	_orient_face_quad(_hover_marker, tile, face)
 
+
+## Orient + size the unit quad `m` onto `face` of tile (`tile`), nudged `_HOVER_LIFT` off the
+## surface and inset from the tile edges, then show it. Shared by the single-tile hover cursor
+## (`set_hover_face`) and the multi-tile brush footprint (`show_footprint`), so both highlight any
+## face — top, underside, or a side — identically. A PlaneMesh lies in its local XZ plane (normal
+## +local Y); each branch rotates it onto the target face and scales it to that face's dimensions
+## (the four sides span the full visible column height). `m`'s mesh must be a 1x1 unit quad.
+func _orient_face_quad(m: MeshInstance3D, tile: Vector2i, face: int) -> void:
 	var c := tile_to_world(tile.x, tile.y)   # center of the TOP surface
 	var top := c.y                            # world Y of the surface
 	var bb := column_bottom(tile.x, tile.y)   # world Y of the drawn column's underside
@@ -403,8 +475,6 @@ func set_hover_face(tile: Vector2i, face: int, color: Color) -> void:
 	var mid := (top + bb) * 0.5               # vertical center of the block
 	var half := tile_size * 0.5
 	var inset := tile_size * 0.96             # sit just inside the tile edges
-	var m := _hover_marker
-	# A PlaneMesh lies in its local XZ plane (normal +local Y); rotate it onto each face.
 	match face:
 		TileFaces.Face.TOP:
 			m.rotation = Vector3.ZERO
@@ -445,29 +515,29 @@ var _footprint_pool: Array[MeshInstance3D] = []
 var _footprint_mesh: PlaneMesh
 var _footprint_material: StandardMaterial3D
 
-## Lift the footprint quad a hair above each tile's cap (matches the resize delete decal).
-const _FOOTPRINT_LIFT := 0.05
 
-
-## Highlight every tile in `tiles` (grid coords) with a translucent `color` quad on its top
-## surface — the brush footprint preview. Off-grid coords are skipped. Reuses/grows a pool and
-## hides any leftover quads from a larger previous footprint, so it never reallocates per frame.
-func show_footprint(tiles: Array, color: Color) -> void:
+## Highlight every tile in `tiles` (grid coords) with a translucent `color` quad on the given
+## `face` — the brush footprint preview, face-aware so a shape brush shows whether it will paint
+## tile TOPS (surface), a SIDE (body), or the UNDERSIDE (bottom), matching where it will actually
+## write. Off-grid coords are skipped. Reuses/grows a pool and hides any leftover quads from a
+## larger previous footprint, so it never reallocates per frame. Each quad is the shared unit mesh,
+## oriented onto the face by `_orient_face_quad` (the same placement the single-tile cursor uses).
+func show_footprint(tiles: Array, face: int, color: Color) -> void:
 	if _footprint_material == null:
 		_footprint_mesh = PlaneMesh.new()
-		_footprint_mesh.size = Vector2(tile_size * 0.92, tile_size * 0.92)
+		_footprint_mesh.size = Vector2.ONE   # unit quad; oriented + scaled per face
 		_footprint_material = StandardMaterial3D.new()
 		_footprint_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		_footprint_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		# Double-sided so side/underside quads read from any orbit angle (matches the hover cursor).
+		_footprint_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_footprint_material.albedo_color = color
 	var shown := 0
 	for t in tiles:
 		var tile: Vector2i = t
 		if not _in_bounds(tile.x, tile.y):
 			continue
-		var q := _claim_footprint(shown)
-		q.position = tile_to_world(tile.x, tile.y) + Vector3(0.0, _FOOTPRINT_LIFT, 0.0)
-		q.visible = true
+		_orient_face_quad(_claim_footprint(shown), tile, face)
 		shown += 1
 	for i in range(shown, _footprint_pool.size()):
 		_footprint_pool[i].visible = false

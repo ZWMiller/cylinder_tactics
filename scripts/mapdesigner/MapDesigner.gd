@@ -119,6 +119,7 @@ var _undo_stack: Array = []   ## Most-recent snapshot is last; each is { "states
 
 var _dragging: bool = false                              ## A left-drag is in progress.
 var _drag_start_tile: Vector2i = Battlefield.INVALID_TILE  ## Tile under the initial press.
+var _drag_start_face: int = TileFaces.Face.TOP           ## Face picked at the press — which layer a PAINT brush writes for the whole stroke.
 var _drag_start_y: float = 0.0                           ## Mouse Y at press (height-drag origin).
 var _drag_levels: int = 0                                ## Current height delta from the vertical drag.
 var _drag_base: Array = []                               ## Deep snapshot of the state at press (restore source).
@@ -141,6 +142,7 @@ var _new_dialog: AcceptDialog
 var _new_name_edit: LineEdit
 var _new_width_spin: SpinBox
 var _new_height_spin: SpinBox
+var _new_sculpted_check: CheckBox   ## New dialog: on = Sculpted depth, off = Auto (the default).
 var _rename_dialog: AcceptDialog
 var _rename_edit: LineEdit
 
@@ -157,7 +159,12 @@ func _ready() -> void:
 	# Seed the starting map BEFORE entering the tree, so the base _ready builds this
 	# blank grid directly instead of the 24x24 DemoMap fallback.
 	_field.states = _new_flat_states(NEW_MAP_WIDTH, NEW_MAP_HEIGHT)
-	add_child(_field)
+	add_child(_field)   # enters the tree → base _ready builds + renders the seeded grid
+
+	# Frame the freshly built grid centered. A new map starts every tile at NEW_TILE_HEIGHT
+	# (world y well above 0), so without this the map floats up out of the camera's y=0 look-at
+	# (the off-center bug). Recentred again on every New / Load / Undo / Resize below.
+	_recenter_camera()
 
 	# Let the designer camera orbit BENEATH the map (battle keeps the default top-down
 	# clamp). Lowering `min_pitch` below 0 is what makes the underside reachable for the
@@ -226,7 +233,44 @@ func _update_hover_preview(tile: Vector2i, face: int) -> void:
 		_field.set_hover_face(tile, face, HOVER_COLOR)
 	else:
 		_field.clear_hover_face()
-		_field.show_footprint(_brush_footprint(tile), HOVER_COLOR)
+		_field.show_footprint(_brush_footprint(tile), _footprint_face(face), HOVER_COLOR)
+
+
+## Which face a shape brush's footprint should preview on (and paint). A PAINT shape brush follows
+## whichever face the cursor picked; a Sculpted FLOOR edit (HEIGHT tool on the underside) previews on
+## the BOTTOM; every other height edit (HEIGHT on top, HILL) previews flat on the TOP.
+func _footprint_face(picked_face: int) -> int:
+	if _tool == Tool.PAINT and _brush != Brush.HILL:
+		return picked_face
+	if _editing_floor_for(picked_face):
+		return TileFaces.Face.BOTTOM
+	return TileFaces.Face.TOP
+
+
+## Whether an edit aimed at `face` should move the authored FLOOR instead of the top: only in
+## Sculpted mode, with the HEIGHT tool, when pointing at the underside. This is the single rule that
+## turns "HEIGHT tool on the bottom face" into bottom-surface sculpting; HILL stays top-only (it
+## ignores the tool), and PAINT routes by face through `_paint_layers` instead.
+func _editing_floor_for(face: int) -> bool:
+	return _field.is_sculpted_depth() and _tool == Tool.HEIGHT and face == TileFaces.Face.BOTTOM
+
+
+## Clamp a new TOP height. In Sculpted mode the top can never drop BELOW the tile's fixed seam
+## `anchor` (its starting height) — so the top only ever rises above the impassable 1-level seam,
+## decoupled from the floor. Auto mode has no seam (clamps to the plain band).
+func _clamp_top(height: int, anchor: int) -> int:
+	var lo := MIN_HEIGHT
+	if _field.is_sculpted_depth():
+		lo = maxi(MIN_HEIGHT, anchor)
+	return clampi(height, lo, MAX_HEIGHT)
+
+
+## Clamp a new FLOOR level. The floor can never rise ABOVE `anchor - 1` (one below the seam), so the
+## seam band `[anchor-1, anchor]` is always solid and the floor only ever sinks below it. This is
+## what makes a disconnected/floating slab impossible: raising the top can't drag the floor's ceiling
+## up with it (the ceiling is the fixed anchor, not the live top).
+func _clamp_floor(floor_level: int, anchor: int) -> int:
+	return clampi(floor_level, MIN_HEIGHT, anchor - 1)
 
 
 ## Hide every designer cursor (face quad, footprint quads, resize ghosts) at once.
@@ -262,14 +306,14 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			elif _tool == Tool.PAINT and _brush == Brush.SINGLE:
 				_paint_single_face(tile, pick["face"])  # face-aware one-tile paint — no drag
 			else:
-				_begin_drag(tile)
+				_begin_drag(tile, pick["face"])
 		elif _dragging:
 			_end_drag()
 	elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 		if _tool == Tool.RESIZE:
 			_apply_resize(tile, false)               # shrink the hovered edge
 		else:
-			_apply_secondary(tile)                   # quick lower / dig
+			_apply_secondary(tile, pick["face"])     # quick lower / dig (floor on the underside)
 
 
 ## Dispatch a key press to a tool/palette/file action.
@@ -295,11 +339,14 @@ func _handle_key(keycode: int) -> void:
 		KEY_BRACKETLEFT:
 			_select_type((PALETTE.find(_active_type) - 1 + PALETTE.size()) % PALETTE.size())
 		KEY_N:
-			# Prefill the dialog with the current map's name/size, then let the user edit.
+			# Prefill the dialog with the current map's name/size/mode, then let the user edit.
 			_new_name_edit.text = _map_name
 			_new_width_spin.value = _field.grid_width
 			_new_height_spin.value = _field.grid_height
+			_new_sculpted_check.button_pressed = _field.is_sculpted_depth()
 			_new_dialog.popup_centered()
+		KEY_M:
+			_toggle_depth_mode()   # convert the CURRENT map between Auto and Sculpted (undoable)
 		KEY_R:
 			_rename_edit.text = _map_name
 			_rename_dialog.popup_centered()
@@ -329,14 +376,26 @@ func _paint_single_face(tile: Vector2i, face: int) -> void:
 		return
 	_push_undo()
 	var bottom: int = t.get("bottom", t["body"])
+	var layers := _paint_layers(face, t["type"], t["body"], bottom, _active_type)
+	# Painting a face never moves the underside — keep the tile's authored floor (set_tile defaults
+	# to preserving it, so we don't pass one).
+	_field.set_tile(tile.x, tile.y, t["height"], layers[0], layers[1], layers[2])
+
+
+## The (surface, body, bottom) terrain types after painting `active` onto `face` of a tile whose
+## current layers are `surface`/`body`/`bottom`. The single place the "clicked face → which layer"
+## rule lives: TOP repaints the surface, BOTTOM the underside, and any of the four sides the
+## (shared) body. Returns `[surface, body, bottom]`. Shared by the SINGLE-brush face paint and the
+## shape-brush stroke so both layer the same way. This match is what grows when N/S/E/W become
+## independently typed (each side would target its own field instead of all sharing `body`).
+func _paint_layers(face: int, surface: int, body: int, bottom: int, active: int) -> Array:
 	match face:
 		TileFaces.Face.TOP:
-			_field.set_tile(tile.x, tile.y, t["height"], _active_type, t["body"], bottom)
+			return [active, body, bottom]
 		TileFaces.Face.BOTTOM:
-			_field.set_tile(tile.x, tile.y, t["height"], t["type"], t["body"], _active_type)
+			return [surface, body, active]
 		_:
-			# NORTH / SOUTH / EAST / WEST all paint the one body type today.
-			_field.set_tile(tile.x, tile.y, t["height"], t["type"], _active_type, bottom)
+			return [surface, active, bottom]
 
 
 # --- Brush drag engine ------------------------------------------------------
@@ -344,12 +403,15 @@ func _paint_single_face(tile: Vector2i, face: int) -> void:
 ## Open a drag session on a left press over `tile`. Snapshots the whole state so every later
 ## frame can re-derive the edit from the original terrain (see the `_drag_*` block). Applies
 ## the initial footprint immediately (delta 0), so a press already shows the brush in place.
-func _begin_drag(tile: Vector2i) -> void:
+func _begin_drag(tile: Vector2i, face: int) -> void:
 	if tile == Battlefield.INVALID_TILE:
 		return
 	_push_undo()   # one undo step for the whole stroke (snapshot before it lands)
 	_dragging = true
 	_drag_start_tile = tile
+	# Lock the paint face for the whole stroke from the press — so dragging across faces (or off
+	# the geometry mid-stroke) doesn't flip which layer (surface/body/bottom) the brush writes.
+	_drag_start_face = face
 	_drag_start_y = get_viewport().get_mouse_position().y
 	_drag_levels = 0
 	_drag_base = _snapshot_state()
@@ -364,11 +426,11 @@ func _update_drag(tile: Vector2i) -> void:
 	_drag_levels = int(round((_drag_start_y - get_viewport().get_mouse_position().y) / DRAG_PX_PER_LEVEL))
 	var edits := _build_drag_edits(tile)
 	_apply_drag_edits(edits)
-	# Preview the footprint over whatever the edit just touched (tops, post-edit heights).
+	# Preview the footprint over whatever the edit just touched, on the locked paint face.
 	var footprint: Array = []
 	for e in edits:
 		footprint.append(Vector2i(e["x"], e["z"]))
-	_field.show_footprint(footprint, HOVER_COLOR)
+	_field.show_footprint(footprint, _footprint_face(_drag_start_face), HOVER_COLOR)
 
 
 ## Finish the drag. A press-and-release with no vertical movement reads as a plain CLICK: for
@@ -395,23 +457,31 @@ func _is_height_step_brush() -> bool:
 ## A one-shot right-click: lower (HEIGHT brushes) or dig a bowl (HILL) under `tile`, by one
 ## step / one brush-size, read straight from the current state (no drag snapshot). Paint and
 ## Line ignore right-click — there's no "un-paint", and a line needs a drag to have length.
-func _apply_secondary(tile: Vector2i) -> void:
+func _apply_secondary(tile: Vector2i, face: int) -> void:
 	if tile == Battlefield.INVALID_TILE:
 		return
 	var center := _field.tile_data(tile.x, tile.y)
 	if center.is_empty():
 		return
+	var floor_edit := _editing_floor_for(face)   # right-click on the underside lowers the FLOOR
 	var edits: Array = []
 	if _brush == Brush.HILL:
-		# Dig a bowl: a downward dome (negative peak = -brush size) sunk from the center tile.
-		# Source reads live tile data (no drag snapshot here), wrapped to take a Vector2i.
+		# Dig a bowl in the TOP: a downward dome (negative peak = -brush size) sunk from the center
+		# tile (HILL ignores the face). Source reads live tile data, wrapped to take a Vector2i.
 		edits = _dome_edits(tile, center["height"], -_brush_size, func(t: Vector2i) -> Dictionary: return _field.tile_data(t.x, t.y))
 	elif _tool == Tool.HEIGHT and _brush != Brush.LINE:
 		for t in _brush_footprint(tile):
 			var d := _field.tile_data(t.x, t.y)
 			if d.is_empty():
 				continue
-			edits.append(_tile_edit(t, clampi(d["height"] - 1, MIN_HEIGHT, MAX_HEIGHT), d["type"], d["body"], d.get("bottom", d["body"])))
+			var fl: int = d.get("floor", d["height"] - 1)
+			var anchor: int = d.get("anchor", d["height"])
+			if floor_edit:
+				# Lower the underside by one level (never above the seam), top untouched.
+				edits.append(_tile_edit(t, d["height"], d["type"], d["body"], d.get("bottom", d["body"]), _clamp_floor(fl - 1, anchor), anchor))
+			else:
+				# Lower the top by one level (never below the seam), underside untouched.
+				edits.append(_tile_edit(t, _clamp_top(d["height"] - 1, anchor), d["type"], d["body"], d.get("bottom", d["body"]), fl, anchor))
 	if not edits.is_empty():
 		_push_undo()
 		_field.set_tiles(edits)
@@ -428,19 +498,35 @@ func _build_drag_edits(tile: Vector2i) -> Array:
 		var c := _base_tile(_drag_start_tile)
 		return _dome_edits(_drag_start_tile, c["height"], _drag_levels, _base_tile)
 	var edits: Array = []
+	var floor_edit := _editing_floor_for(_drag_start_face)   # sculpting the underside this stroke?
 	for t in _drag_footprint(tile):
 		var b := _base_tile(t)
 		if b.is_empty():
 			continue
 		var bottom: int = b.get("bottom", b["body"])
+		var floor_level: int = b.get("floor", b["height"] - 1)
+		var anchor: int = b.get("anchor", b["height"])   # fixed seam — both clamps reference it
 		if _tool == Tool.PAINT:
-			edits.append(_tile_edit(t, b["height"], _active_type, b["body"], bottom))
+			# Write the active type into the layer the LOCKED press face targets (top=surface,
+			# sides=body, underside=bottom) — the shape-brush twin of the single-face paint. The
+			# underside LEVEL is untouched (painting never moves geometry).
+			var layers := _paint_layers(_drag_start_face, b["type"], b["body"], bottom, _active_type)
+			edits.append(_tile_edit(t, b["height"], layers[0], layers[1], layers[2], floor_level, anchor))
 		elif _brush == Brush.LINE:
-			# Flatten the line to the height the drag STARTED on (level a path across bumps).
-			var flat: int = _base_tile(_drag_start_tile)["height"]
-			edits.append(_tile_edit(t, flat, b["type"], b["body"], bottom))
+			if floor_edit:
+				# Flatten the underside LINE to the floor the drag started on (clamped under the seam).
+				var flat_floor: int = _base_tile(_drag_start_tile).get("floor", _base_tile(_drag_start_tile)["height"] - 1)
+				edits.append(_tile_edit(t, b["height"], b["type"], b["body"], bottom, _clamp_floor(flat_floor, anchor), anchor))
+			else:
+				# Flatten the TOP line to the height the drag STARTED on (level a path across bumps).
+				var flat: int = _base_tile(_drag_start_tile)["height"]
+				edits.append(_tile_edit(t, _clamp_top(flat, anchor), b["type"], b["body"], bottom, floor_level, anchor))
+		elif floor_edit:
+			# HEIGHT tool on the underside: shift the FLOOR by the drag (never above the seam), top untouched.
+			edits.append(_tile_edit(t, b["height"], b["type"], b["body"], bottom, _clamp_floor(floor_level + _drag_levels, anchor), anchor))
 		else:
-			edits.append(_tile_edit(t, clampi(b["height"] + _drag_levels, MIN_HEIGHT, MAX_HEIGHT), b["type"], b["body"], bottom))
+			# HEIGHT tool on the top: shift the height (never below the seam), underside untouched.
+			edits.append(_tile_edit(t, _clamp_top(b["height"] + _drag_levels, anchor), b["type"], b["body"], bottom, floor_level, anchor))
 	return edits
 
 
@@ -459,8 +545,12 @@ func _dome_edits(center: Vector2i, base_h: int, peak: int, source: Callable) -> 
 		# Linear falloff: full peak at the center, fading to ~0 at the rim. round() keeps it
 		# on the integer height grid; a negative peak digs symmetrically.
 		var contrib := int(round(peak * (1.0 - dist / radius)))
-		var target := clampi(base_h + contrib, MIN_HEIGHT, MAX_HEIGHT)
-		edits.append(_tile_edit(t, target, src["type"], src["body"], src.get("bottom", src["body"])))
+		# HILL sculpts the TOP only (it ignores the tool/face); keep the authored floor + seam and
+		# clamp the new top to the seam so a dug bowl can't drop below it in Sculpted mode.
+		var src_floor: int = src.get("floor", src["height"] - 1)
+		var src_anchor: int = src.get("anchor", src["height"])
+		var target := _clamp_top(base_h + contrib, src_anchor)
+		edits.append(_tile_edit(t, target, src["type"], src["body"], src.get("bottom", src["body"]), src_floor, src_anchor))
 	return edits
 
 
@@ -476,7 +566,7 @@ func _apply_drag_edits(edits: Array) -> void:
 		var tile: Vector2i = t
 		if not new_keys.has(tile):
 			var b := _base_tile(tile)
-			batch.append(_tile_edit(tile, b["height"], b["type"], b["body"], b.get("bottom", b["body"])))
+			batch.append(_tile_edit(tile, b["height"], b["type"], b["body"], b.get("bottom", b["body"]), b.get("floor", b["height"] - 1), b.get("anchor", b["height"])))
 	batch.append_array(edits)
 	_field.set_tiles(batch)
 	_drag_last_footprint = new_keys.keys()
@@ -573,9 +663,12 @@ func _base_tile(tile: Vector2i) -> Dictionary:
 	return _drag_base[tile.x][tile.y]
 
 
-## A `set_tiles` edit entry — the one place the dict shape is spelled out.
-func _tile_edit(tile: Vector2i, height: int, type: int, body: int, bottom: int) -> Dictionary:
-	return {"x": tile.x, "z": tile.y, "height": height, "type": type, "body": body, "bottom": bottom}
+## A `set_tiles` edit entry — the one place the dict shape is spelled out. `floor` is the authored
+## bottom level and `anchor` the fixed seam (both Sculpted-only; Auto maps carry them along
+## harmlessly — the renderer ignores both). Every edit preserves the tile's existing `anchor` (it's
+## only (re)set on New / convert / resize), so callers pass the base tile's anchor straight through.
+func _tile_edit(tile: Vector2i, height: int, type: int, body: int, bottom: int, floor_level: int, anchor: int) -> Dictionary:
+	return {"x": tile.x, "z": tile.y, "height": height, "type": type, "body": body, "bottom": bottom, "floor": floor_level, "anchor": anchor}
 
 
 ## Grow or shrink the map at the hovered edge `tile`. Left-click (`primary`) ADDS a
@@ -596,7 +689,34 @@ func _apply_resize(tile: Vector2i, primary: bool) -> void:
 	if not changed:
 		_undo_stack.pop_back()   # the shrink was refused — discard the unused snapshot
 	_field.clear_resize_preview()   # the edit recentered the grid; recompute next hover
+	if changed:
+		_recenter_camera()          # the grid moved/regrew — reframe it centered
 	_refresh_label()
+
+
+## Point the designer camera at the current grid's center so the whole map frames centered.
+## Called on every STRUCTURAL change (New / Load / Undo / Resize, and the initial build) — NOT
+## on per-tile brush edits, which would make the view jump around while you paint. The center's
+## Y tracks the terrain's height band (see `Battlefield.grid_center_world`), which is what fixes
+## a high-altitude map (new maps start at level 20) rendering above the camera's look-at.
+func _recenter_camera() -> void:
+	_camera.snap_to(_field.grid_center_world())
+
+
+## Convert the CURRENT map between Auto and Sculpted depth (the `M` key) — the "switchable later"
+## path, made fully undoable by snapshotting first. Auto→Sculpted bakes the currently-derived
+## undersides into authored floors so nothing visually jumps; Sculpted→Auto just resumes deriving
+## (the authored floors stay in the tile dicts, so flipping back restores them — they're only
+## dropped when an Auto map is SAVED). One `U` reverts the whole convert.
+func _toggle_depth_mode() -> void:
+	_push_undo()
+	var to_sculpted := not _field.is_sculpted_depth()
+	if to_sculpted:
+		_field.seed_sculpt_from_derived()   # freeze derived undersides as floors + set the seam anchors
+	_field.set_sculpted_depth(to_sculpted)
+	_field.redraw()
+	_refresh_label()
+	print("MapDesigner: depth mode → %s" % ("SCULPTED" if to_sculpted else "AUTO"))
 
 
 ## Set the active paint type to PALETTE[index] and refresh the HUD (text + swatch bar).
@@ -625,7 +745,10 @@ func _new_flat_states(w: int, h: int) -> Array:
 	for x in w:
 		var column: Array = []
 		for z in h:
-			column.append({"height": NEW_TILE_HEIGHT, "type": TileTypes.Type.GRASS, "body": TileTypes.Type.DIRT, "bottom": TileTypes.Type.DIRT})
+			# floor = one level below the top → a 1-thick slab if this map is (or becomes) Sculpted;
+			# ignored while Auto. anchor = the top → the seam starts at the surface, so from here the
+			# top only rises and the floor only sinks (no floating slabs). Both ignored while Auto.
+			column.append({"height": NEW_TILE_HEIGHT, "type": TileTypes.Type.GRASS, "body": TileTypes.Type.DIRT, "bottom": TileTypes.Type.DIRT, "floor": NEW_TILE_HEIGHT - 1, "anchor": NEW_TILE_HEIGHT})
 		grid.append(column)
 	return [grid]
 
@@ -635,7 +758,10 @@ func _new_flat_states(w: int, h: int) -> Array:
 ## Capture the current map (all states + name) onto the undo ring, dropping the oldest if the
 ## ring is full. Call this BEFORE applying a change so the snapshot is the pre-edit state.
 func _push_undo() -> void:
-	_undo_stack.append({"states": _clone_states(_field.states), "name": _map_name})
+	# Capture the depth MODE too, so undoing a mode convert (or any edit made under a mode) restores
+	# the right one. Floors ride inside the cloned states, so a convert that baked/changed them is
+	# fully reversible (this is the "switch must be undoable" requirement).
+	_undo_stack.append({"states": _clone_states(_field.states), "name": _map_name, "sculpted": _field.is_sculpted_depth()})
 	if _undo_stack.size() > UNDO_DEPTH:
 		_undo_stack.pop_front()
 
@@ -648,7 +774,10 @@ func _undo() -> void:
 		return
 	var snap: Dictionary = _undo_stack.pop_back()
 	_map_name = snap["name"]
+	# Restore the mode BEFORE load_states (which redraws), so the underside renders in the right mode.
+	_field.set_sculpted_depth(snap.get("sculpted", false))
 	_field.load_states(snap["states"])
+	_recenter_camera()   # the restored map may differ in size/height — reframe it centered
 	_refresh_label()
 	print("MapDesigner: undo (%d left)" % _undo_stack.size())
 
@@ -672,7 +801,10 @@ func _clone_states(states: Array) -> Array:
 
 ## Pack the field's current state into a MapData and write it to `path`.
 func _on_save_path_chosen(path: String) -> void:
-	var data := MapData.from_states(_field.states, _map_name)
+	# Persist the depth mode so the map reloads (here and in battle) with the same underside model;
+	# from_states only writes the floors array for a Sculpted map (Auto stays compact).
+	var mode := MapData.DepthMode.SCULPTED if _field.is_sculpted_depth() else MapData.DepthMode.AUTO
+	var data := MapData.from_states(_field.states, _map_name, mode)
 	# res:// is writable when running from the editor (F6); ensure the folder exists.
 	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
 	var err := data.save_to(path)
@@ -687,7 +819,10 @@ func _on_load_path_chosen(path: String) -> void:
 		return
 	_push_undo()   # loading replaces the map — keep the previous one undoable
 	_map_name = data.map_name
+	# Adopt the saved depth mode BEFORE load_states (which redraws) so the underside renders right.
+	_field.set_sculpted_depth(data.depth_mode == MapData.DepthMode.SCULPTED)
 	_field.load_states(data.to_states())
+	_recenter_camera()   # the loaded map may sit at any height band — frame it centered
 	print("MapDesigner: loaded '%s' (%dx%d) from %s" % [_map_name, data.width, data.height, path])
 	_refresh_label()
 
@@ -854,6 +989,11 @@ func _build_new_dialog() -> void:
 	vb.add_child(_field_label("Length (Z tiles)"))
 	_new_height_spin = _make_spin(NEW_MAP_HEIGHT)
 	vb.add_child(_new_height_spin)
+	# Depth mode: off = Auto (underside follows the terrain — the default), on = Sculpted (author the
+	# underside independently for slabs / floating tiles / gaps). See MapData.DepthMode.
+	_new_sculpted_check = CheckBox.new()
+	_new_sculpted_check.text = "Sculpted depth (author underside separately)"
+	vb.add_child(_new_sculpted_check)
 	_new_dialog.confirmed.connect(_on_new_confirmed)
 	add_child(_new_dialog)
 
@@ -899,11 +1039,14 @@ func _make_spin(value: int) -> SpinBox:
 
 ## Create a fresh flat map at the chosen size + name, discarding the current one.
 func _on_new_confirmed() -> void:
-	_push_undo()   # an accidental New is undoable (restores the old map + name)
+	_push_undo()   # an accidental New is undoable (restores the old map + name + mode)
 	var w := int(_new_width_spin.value)
 	var h := int(_new_height_spin.value)
 	_map_name = _clean_name(_new_name_edit.text)
+	# Set the depth mode BEFORE load_states (which redraws) so the first render matches the choice.
+	_field.set_sculpted_depth(_new_sculpted_check.button_pressed)
 	_field.load_states(_new_flat_states(w, h))
+	_recenter_camera()   # frame the new (high-altitude) blank map centered
 	_refresh_label()
 
 
@@ -931,17 +1074,26 @@ func _dialog_open() -> bool:
 func _refresh_label() -> void:
 	var w: int = _field.grid_width
 	var h: int = _field.grid_height
-	_label.text = "\n".join([
+	var depth: String = "Sculpted" if _field.is_sculpted_depth() else "Auto"
+	var lines := [
 		"MAP DESIGNER  —  %s  (%dx%d)" % [_map_name, w, h],
+		"Depth: %s            [M] convert mode" % depth,
 		"Tool: %s            [Tab] cycle tool" % Tool.keys()[_tool],
 		"Brush: %s (size %d)   [B] cycle brush, - / = size" % [Brush.keys()[_brush], _brush_size],
 		"Type: %s            [ and ] cycle, 1-0 quick-pick" % TileTypes.Type.keys()[_active_type],
 		"",
 		"HEIGHT tool: L-click raise / drag up-down to set, R-click lower",
+	]
+	# Only mention underside sculpting when it's actually available (Sculpted maps), to avoid
+	# implying the bottom is editable on an Auto map (where the HEIGHT tool there is a no-op).
+	if _field.is_sculpted_depth():
+		lines.append("   (point at the UNDERSIDE to sculpt the floor; top & bottom are independent)")
+	lines.append_array([
 		"PAINT tool: L-click paints the active type over the brush footprint",
-		"   (SINGLE brush is face-aware: top=surface, sides=body, underside=bottom)",
+		"   (face-aware: top=surface, sides=body, underside=bottom)",
 		"Brushes: SINGLE / SQUARE / CIRCLE / LINE (drag) / HILL (drag up=hill, down=valley)",
 		"RESIZE tool: hover an edge — L-click adds, R-click deletes (corner = both sides)",
 		"Camera: wheel zoom, Q/E orbit, middle-drag free-orbit (drag down to go under)",
 		"[U] undo (last %d)   [N] new   [R] rename   [S] save   [L] load" % UNDO_DEPTH,
 	])
+	_label.text = "\n".join(lines)

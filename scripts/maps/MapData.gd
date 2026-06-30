@@ -20,6 +20,22 @@
 class_name MapData
 extends Resource
 
+## How a map's column UNDERSIDES are determined — the "depth mode", chosen at New and saved here.
+##   AUTO     — the underside FOLLOWS the terrain: `Battlefield` derives each column's bottom from
+##              its neighbours (drop to the lowest adjacent surface, else a thin slab). The classic
+##              solid-ground look, where the top is the only authored surface. Default, and how
+##              every legacy map (no stored mode → 0 → AUTO) loads.
+##   SCULPTED — the underside is authored INDEPENDENTLY of the top (`MapState.floors`): each column
+##              is drawn exactly `[floor, height]`, so thick slabs, floating tiles, and deliberate
+##              gaps are all possible. Editing the top leaves the bottom alone and vice-versa.
+## Authoring/visual only for now — gameplay still walks on tops (walkable undersides are the
+## separate Phase 5 work; see docs/TODO.md).
+enum DepthMode { AUTO, SCULPTED }
+
+## This map's depth mode (see `DepthMode`), stored as the enum's backing int. Absent/0 on a legacy
+## resource reads as AUTO, so old maps keep their derived undersides with no migration.
+@export var depth_mode: int = DepthMode.AUTO
+
 ## Human-readable map name (shown in the designer's load list / debug prints). Not the
 ## filename — a map saved as `arena.tres` can still be named "The Arena".
 @export var map_name: String = "Untitled"
@@ -46,6 +62,8 @@ func to_states() -> Array:
 	for st in states:
 		var has_bodies := st.bodies.size() == st.heights.size()
 		var has_bottoms := st.bottoms.size() == st.heights.size()
+		var has_floors := st.floors.size() == st.heights.size()
+		var has_anchors := st.anchors.size() == st.heights.size()
 		var grid: Array = []
 		for x in width:
 			var column: Array = []
@@ -59,6 +77,13 @@ func to_states() -> Array:
 					"body": body,
 					# Unauthored/legacy undersides inherit the side color (see MapState).
 					"bottom": st.bottoms[idx] if has_bottoms else body,
+					# Authored bottom LEVEL (Sculpted maps only). Absent on Auto/legacy maps, where
+					# the renderer derives the bottom from neighbours and ignores this; a default of
+					# one level below the top keeps a column 1-thick if it's ever read by mistake.
+					"floor": st.floors[idx] if has_floors else st.heights[idx] - 1,
+					# Fixed seam anchor (Sculpted editing constraint). Absent → the tile's own top, so
+					# a loaded map re-anchors at its current height. See MapState.anchors.
+					"anchor": st.anchors[idx] if has_anchors else st.heights[idx],
 				})
 			grid.append(column)
 		result.append(grid)
@@ -69,13 +94,17 @@ func to_states() -> Array:
 ## flattening each state into a `MapState`. This is how procedurally-generated maps
 ## (`DemoMap`) and the designer's in-memory grid become a saveable resource. Dimensions
 ## are read from the first state; all states are assumed to share them.
-static func from_states(p_states: Array, p_name: String = "Untitled") -> MapData:
+static func from_states(p_states: Array, p_name: String = "Untitled", p_depth_mode: int = DepthMode.AUTO) -> MapData:
 	var data := MapData.new()
 	data.map_name = p_name
+	data.depth_mode = p_depth_mode
 	if p_states.is_empty():
 		return data   # an empty map — width/height stay 0
 	data.width = p_states[0].size()
 	data.height = (p_states[0][0] as Array).size()
+	# Only Sculpted maps carry authored floors; an Auto map leaves the `floors` array empty so its
+	# `.tres` stays as compact as before and the renderer derives the underside on load.
+	var sculpted := p_depth_mode == DepthMode.SCULPTED
 	for grid in p_states:
 		var st := MapState.new()
 		# Pre-size the flat arrays so we can assign by index instead of appending.
@@ -83,6 +112,9 @@ static func from_states(p_states: Array, p_name: String = "Untitled") -> MapData
 		st.types.resize(data.width * data.height)
 		st.bodies.resize(data.width * data.height)
 		st.bottoms.resize(data.width * data.height)
+		if sculpted:
+			st.floors.resize(data.width * data.height)
+			st.anchors.resize(data.width * data.height)
 		for x in data.width:
 			for z in data.height:
 				var idx := x * data.height + z
@@ -94,6 +126,11 @@ static func from_states(p_states: Array, p_name: String = "Untitled") -> MapData
 				st.bodies[idx] = body
 				# An unauthored underside is saved inheriting the side color.
 				st.bottoms[idx] = tile.get("bottom", body)
+				if sculpted:
+					# Default a missing floor to one level below the top (a 1-thick slab).
+					st.floors[idx] = tile.get("floor", tile["height"] - 1)
+					# Default a missing seam anchor to the tile's top (its starting height).
+					st.anchors[idx] = tile.get("anchor", tile["height"])
 		data.states.append(st)
 	return data
 

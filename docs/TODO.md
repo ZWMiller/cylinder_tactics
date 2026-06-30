@@ -116,25 +116,25 @@ tuning falloff constants. Decided: in-game designer scene (new / load-existing /
 save), maps saved as a custom `MapData` Resource (`.tres`).
 
 #### 🐞 Designer bugs to fix next (found playtesting Phase 2)
-- [ ] **Designer view/map off-center.** The map renders offset up-left from the camera's
-      center instead of centered (noticeable after editing/resizing). The camera looks at the
-      world origin and `Battlefield` is supposed to center the grid on origin via
-      `_grid_to_world_x/z` (uses `grid_width`/`grid_height`); something is leaving the visible
-      land off-origin. Investigate: does RESIZE recenter correctly (the `_resize` rebuild +
-      `_adopt_dimensions_from_states`)? Should the designer camera retarget the grid's centroid,
-      or frame to the map's filled extent, rather than assuming origin? Pick: fix centering, or
-      point `CameraController.target` at the actual grid center on load/resize.
-- [ ] **See-through gaps between columns when a tile is lowered below its neighbours** (worst
-      with the HILL valley / lower). Where a tile sits well below the tiles around it, you can
-      see through the seam to the sky (visible as black/background slivers at the base of taller
-      neighbours). Cause is the neighbour-aware "thin slab" column depth: `Battlefield.column_bottom`
-      only drops a column down to its *lowest neighbour*, so a tall column beside a deep pit
-      doesn't extend its side face all the way to the pit floor — leaving a gap. Fix: a column's
-      exposed side face should reach down to the **neighbour it abuts on that side** (per-side
-      bottom), not a single column-wide minimum; or just draw each exposed face down to that
-      neighbour's top. Touches `render_state` (side-face geometry) + `column_bottom`. (The grid
-      overlay already computes per-side drops in `EditableBattlefield._rebuild_grid_overlay` — the
-      same idea applied to the solid mesh.)
+- [x] **Designer view/map off-center.** Root cause: the grid is centered on origin in X/Z only —
+      nothing centered **Y**, and a fresh map starts every tile at `NEW_TILE_HEIGHT` (20 → world
+      y≈10), so the whole map floated up out of the camera's y=0 look-at. Fix: new
+      `Battlefield.grid_center_world()` (X/Z on origin, Y = midpoint of the visible surface band) +
+      `CameraController.snap_to()` (instant, non-glide recenter) + `MapDesigner._recenter_camera()`,
+      called on the STRUCTURAL events (initial build / New / Load / Undo / Resize) but NOT per
+      brush-stroke (which would make the view jump while painting).
+- [x] **See-through slivers at the waterline** (the gap turned out to be liquid-recess, not the
+      column-min theory). A liquid cap is drawn `liquid_recess` (0.15) BELOW its rim, but
+      `_column_bottom_in` dropped a neighbour's wall only to the integer rim — leaving a 0.15
+      see-through band at every solid↔liquid seam. Fix: `_column_bottom_in` now works in
+      VISIBLE-surface space (`_surface_world_y`) for both the tile and its neighbours, so a wall
+      reaches the actual waterline. Subtlety (and a regression caught in playtest): comparing
+      recessed neighbours against an integer-rim OWN top invented a false 0.15 cliff that collapsed
+      a flat liquid field (e.g. a square-brushed pool) to ~0-height z-fighting columns — fixed by
+      using the tile's own visible surface for `top` too. `EditableBattlefield._rebuild_grid_overlay`
+      updated to match so outline posts meet the corrected wall. (Solid↔solid behaviour unchanged.)
+      NOTE: the original *column-min* theory (diagonal saddle corners, one-sided over-drop) is still
+      a latent cosmetic issue but wasn't what was visible — revisit only if corner slivers show up.
 - [x] **Map format + load/save + variable size** — `MapData` / `MapState` resources
       (`scripts/maps/`): a map carries its own `width`/`height` and an ordered list of
       states stored as flat `PackedInt32Array`s (compact, diff-able `.tres`).
@@ -142,6 +142,17 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       wrap `ResourceSaver`/`load`. `Battlefield` gained a `map_data` export (wins over
       `states`/DemoMap) and `_adopt_dimensions_from_states()` so grid size now comes from
       the data, not the exports. See `docs/BATTLEFIELD.md`.
+- [x] **Depth modes — Auto vs Sculpted underside** — a per-map `MapData.DepthMode` (saved in the
+      `.tres`, chosen at New, switchable via the designer `M` key, undoable). **AUTO** (default,
+      legacy) derives each column's bottom from neighbours as before; **SCULPTED** authors a per-tile
+      `floor` level (new `MapState.floors`, written only for sculpted maps) so columns are drawn
+      exactly `[floor, top]` — thick slabs, deliberate gaps. The HEIGHT tool is now face-aware
+      (top=height, underside=floor). Each sculpted tile also has a fixed **seam anchor** (its starting
+      top, persisted in `MapState.anchors`): the top can't drop below it, the floor can't rise above
+      `anchor-1`, so the 1-level seam is always solid — top/bottom edits are fully decoupled and a
+      column can't be pinched into a disconnected floating slab. The time-shift cascade morphs floors
+      too. **Authoring/visual only — gameplay still walks on tops** (walkable undersides stay the
+      Phase 5 item). See `docs/DECISION_LOG.md` (2026-06-29).
 - [~] **Map designer scene** — in-game scene (`scenes/MapDesigner.tscn`, run with F6).
       **Phase 1 DONE:** `EditableBattlefield extends Battlefield` (additive editing API +
       designer-only grid overlay, `Battlefield.gd` untouched) + `MapDesigner.gd` (Height/
@@ -160,7 +171,12 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       **size** (radius, `-`/`=`) and **click-drag height** (drag up/down sets levels; HILL drags a
       falloff dome UP for a hill or DOWN for a valley). Footprints route through
       `EditableBattlefield.set_tiles` (one redraw) with a base-snapshot restore so scrubbing a
-      line/paint leaves no trail; a new `show_footprint` overlay previews the brush. Also added a
+      line/paint leaves no trail; a new `show_footprint` overlay previews the brush. The shape
+      brushes (SQUARE / CIRCLE / LINE) are now **face-aware** like SINGLE: the face picked at press
+      is locked for the stroke and routes the paint to that layer (top→surface, sides→body,
+      underside→bottom), with the footprint preview drawn ON that face (`EditableBattlefield`'s
+      shared `_orient_face_quad`; `MapDesigner._paint_layers` is the one face→layer rule). HILL
+      stays height-only. Also added a
       **5-deep Undo** (`U`) capturing states + name before every edit (brush, resize, New/Load/
       Rename). **Phase 3 — Encounter layer:** turn the builder into an *encounter builder* — place
       enemies (class/weapon/armor/level + per-stat HP/MP/Speed/Move overrides), named characters/

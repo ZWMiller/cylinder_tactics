@@ -47,3 +47,19 @@ extends Resource
 ## existed, in which case `MapData.to_states` falls back to the tile's body type, so an
 ## old map's underside simply matches its sides and nothing changes visually.
 @export var bottoms: PackedInt32Array = PackedInt32Array()
+
+## Flat, row-major SEAM ANCHOR LEVELS parallel to `heights` — the fixed "starting height" each
+## Sculpted column was created at. It's the impassable 1-level seam between the two faces: the TOP
+## can never drop below `anchor`, the FLOOR can never rise above `anchor - 1`. So editing one face
+## never invades the other's side and a column can't be pinched into a disconnected floating slab.
+## Sculpted maps only (same "absent → fall back to `heights`" rule); empty/ignored on Auto maps.
+@export var anchors: PackedInt32Array = PackedInt32Array()
+
+## Flat, row-major BOTTOM SURFACE LEVELS parallel to `heights` — the authored underside height of
+## each column, in the same integer "levels" as `heights` (NOT world units). Only meaningful on a
+## **Sculpted-depth** map (`MapData.depth_mode == SCULPTED`), where the top and bottom are authored
+## independently and each column is drawn exactly `[floor, height]`. On an **Auto-depth** map this
+## is empty and `Battlefield` derives the underside from the neighbours instead — which is the
+## default and exactly how every map saved before this field existed loads (same "absent → derive"
+## back-compat rule as `bodies`/`bottoms`). See `MapData.DepthMode`.
+@export var floors: PackedInt32Array = PackedInt32Array()

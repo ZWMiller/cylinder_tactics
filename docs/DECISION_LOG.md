@@ -6,6 +6,60 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-29 — Map depth modes: Auto (derived underside) vs Sculpted (authored floor)
+
+**Decision:** A map carries a per-map **depth mode** (`MapData.DepthMode` = `AUTO` | `SCULPTED`),
+chosen at New and saved in the `.tres`. **AUTO** (default, every legacy map) is today's behaviour —
+each column's underside is *derived* from the neighbours at render time (`Battlefield._column_bottom_in`).
+**SCULPTED** gives each tile an authored bottom **level** (`floor`), so a column is drawn exactly
+`[floor, top]`: thick slabs, floating tiles, and deliberate gaps. Editing the top leaves the bottom
+alone and vice-versa. **Authoring/visual only** — gameplay still walks on tops (jump/range/path read
+the integer `height`, untouched); walkable undersides remain the separate Phase 5 work.
+
+**Why one data model, two editing modes (the elegant unification):** an AUTO underside is a *pure
+function of the tops*, so it's always derivable — meaning SCULPTED is the general representation and
+AUTO is the special case. That makes the modes **switchable** (the `M` key), not a permanent fork:
+AUTO→SCULPTED seeds the sculpted layers from what AUTO was drawing (`seed_sculpt_from_derived`, an
+integer-level twin of the auto derivation) so nothing visually jumps; SCULPTED→AUTO just resumes
+deriving (authored floors stay in the tile dicts, only dropped when an AUTO map is *saved*). The
+convert is **undoable** — `_push_undo` now snapshots the mode flag alongside states (floors + anchors
+ride inside the states), per the owner's requirement that a wild convert be reversible.
+
+**Seam anchor — no floating slabs (owner's refinement):** a naive "floor ≤ height-1" clamp let the
+floor's ceiling rise *with* the top, so raising a top then bringing the floor up to meet it pinched
+out a disconnected floating slab. Fixed by giving each SCULPTED tile a fixed **seam anchor** = its
+starting top. The TOP can never drop below `anchor`; the FLOOR can never rise above `anchor-1`. So
+the 1-level seam band `[anchor-1, anchor]` is always solid, the two faces are **fully decoupled**
+(editing one never moves the other's bound), and a column can't be disconnected. The anchor is
+(re)set only on New / convert / resize (= the tile's current top), never by a normal edit.
+
+**Format (additive, back-compatible):** `MapState.floors` and `MapState.anchors` are new flat
+`PackedInt32Array`s, written **only for SCULPTED maps** (AUTO `.tres` stay byte-identical and
+compact); absent → derive / fall back, the same rule as `bodies`/`bottoms`. The anchor is
+**persisted** (not session-only) so a saved map's seam survives reload — otherwise re-opening would
+re-anchor at the loaded heights and silently forbid pushing a top back down or a floor back up.
+`MapData.depth_mode` defaults to `AUTO` (0), so old maps load unchanged with zero migration.
+
+**Editing UX (reuses the face-aware picking):** the HEIGHT tool became face-aware — point at the TOP
+to move `height`, orbit under and point at the UNDERSIDE to move `floor` (SCULPTED only; a no-op on
+AUTO), each clamped against the fixed seam (above). HILL stays top-only (it ignores the tool). New
+Sculpted maps start **1 level thick** (`floor = height-1`, `anchor = height`).
+
+**Time-degradation catches the floor too:** the shift cascade interpolates the authored `floor`
+alongside the top (`_anim_floor`, paced by whichever face travels further), so the time-degradation
+gimmick reshapes the underside of a SCULPTED map, not just its top. AUTO maps keep deriving the
+bottom from the *animating* neighbour heights as before.
+
+**Names:** "Auto" / "Sculpted" chosen over "coupled" / "independent" — intelligible in the New dialog
+without the design conversation. Saved as an int, so relabeling later is free.
+
+**Alternatives rejected:** per-tile mode (too much editor/UI complexity for v1 — per-map is the
+authoring unit); locking the mode permanently at New (the derivable-underside insight makes switching
+clean, and undo covers an unwanted convert); baking floors into AUTO saves (would bloat the format
+and lose the recess nuance — AUTO stays render-time derived).
+
+---
+
 ## 2026-06-28 — Move undo (anchor-based), + a reusable green heal float
 
 **Decision:** A player can take back **movement** (and reclaim the move slot(s) it spent) freely, up

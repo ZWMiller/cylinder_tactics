@@ -122,6 +122,15 @@ func focus_on(point: Vector3) -> void:
 	_desired_target = point
 
 
+## Recenter the look-at on `point` IMMEDIATELY (no glide) and refresh the transform now. The map
+## designer uses this to frame a freshly built / loaded / resized grid centered on the spot, where
+## `focus_on`'s smooth ease would instead read as the view drifting rather than a deliberate cut.
+func snap_to(point: Vector3) -> void:
+	target = point
+	_desired_target = point
+	_update_transform()
+
+
 ## Handle discrete events: wheel zoom, and starting/ending a middle-mouse orbit
 ## drag plus the drag motion itself.
 func _unhandled_input(event: InputEvent) -> void:
