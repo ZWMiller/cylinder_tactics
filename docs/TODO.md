@@ -192,6 +192,21 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       (occupancy/pathing/LoS/`tile_to_world`, all keyed by one height per (X,Z)) don't support —
       so it's a real data-model + resolver change, not just rendering. Think the data shape through
       (a per-column list of solid spans? a separate "overhead" layer?) before building.
+- [ ] **Menu / UI cleanup pass + portrait art + textbox component** (do AFTER Phase 3 — the
+      encounter builder) — a focused look-and-feel pass across every menu/HUD (loadout, battle
+      action/spell/status/shift, designer, encounter UI, end screens) so they read as one tuned UI,
+      AND wire in the **portrait art** already committed under `assets/ui/portraits/` (the AI-god mood
+      frames — normal/bored/crazed/horror — plus per-class male/female portraits) to replace the
+      placeholder loadout frame and surface the meta-god (see `docs/GAME_DESIGN.md` §11). Includes
+      building a reusable **textbox / dialogue component** — a portrait + speaker name + typed-out
+      message box that can be advanced/dismissed (and queue multiple lines) — for the meta-god's
+      asides and any story/tutorial beats; the mood portraits are meant to drive its expression. Keep
+      it data-driven (a list of `{portrait, name, text}` lines) so battles/encounters/the run loop can
+      all trigger dialogue. Sequenced here because the encounter builder adds more UI worth polishing
+      in the same pass. Folds together with the existing **"Menu polish pass (all scenes)"** and
+      **"★ Global UI theme system"** items under Polish below — ideally fold the inline `add_theme_*`
+      overrides into the project-default `Theme` (and route the textbox through it) as part of this.
+      The art is committed but **not yet referenced by any code**.
 - [x] **Terrain vocabulary + property table + two-layer tiles** — `TileTypes` now holds a
       single-source-of-truth table per type: `color`, `move_cost`, `is_liquid`, `can_cast`,
       `hazard_damage` (reserved, lava placeholder). New types: `DIRT` (default body), `LAVA`,
