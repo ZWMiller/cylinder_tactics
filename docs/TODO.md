@@ -108,6 +108,116 @@ Workflow: **code-driven** (generate grid/terrain/units from data in GDScript).
 
 ## Next
 
+### ★ Demo — the critical path (the finish line everything sequences toward)
+The North Star is the **scripted vertical slice in `docs/DEMO_PLAN.md`** (target set 2026-06-27):
+a tight, authored ~6-battle sitting that proves how the game *feels* and lands the **meta-god
+reveal** — built to send to friends for feedback, not to be systemically complete. This subsection
+is the **build order** for that slice; the detailed items live in the sections below and in
+`DEMO_PLAN.md` §2–3. Marked `[x]` done / `[~]` partial / `[ ]` not started.
+
+**Phase A — foundations (author + play one fight):** these gate all authored content.
+- [~] **Encounter builder working** — author a fight visually, save, one-click playtest. Placement
+      tools + regions + save DONE; **remaining: MAPS sequence panel + the quick-test hook** (see the
+      "Map designer scene" item below).
+- [~] **A fun single battle** — the core loop must feel good on its own. Combat is built; needs the
+      **balance pass** + **line-of-sight** (both in "Map & tiles overhaul" / "Polish" below).
+- [ ] **Dialog / textbox system** — *net-new, load-bearing.* Every scene's banter + the god's
+      fourth-wall interruptions ride on it. Build it generic (speaker + text + advance, usable from a
+      battle AND a cutscene). Currently folded into the "Menu/UI cleanup + textbox" item below —
+      **pull it forward; the demo can't be authored without it.**
+- [ ] **[DEMO] Per-character deploy-tile placement** — before a battle, let the player place each unit
+      on a tile inside the `deploy` region (today `BattleBase` auto-fills the zone; `BattleBase.gd:1079`
+      calls per-character picking "a later flow"). Standard tactics pre-battle setup.
+- [ ] **[DEMO] Healing spell** — a support ability so combat isn't only damage (a White/Cure-style
+      heal that restores HP, MP-costed, targeted like Fireball). Exercises the generic attack/target
+      pipeline in the *positive* direction (the `FloatingCombatText` "+N" heal path already exists);
+      pairs with the spell-learning item under "Then".
+- [ ] **[DEMO] Item usage in battle** — an **"Item"** action to use a consumable (potion, etc.) from
+      the party inventory during a fight. Reuses the `SpellMenu` nested-submenu convention (which was
+      built "so future Item/other submenus reuse it") and ties to the finite-inventory item below.
+- [ ] **[DEMO] Lightweight title screen** — the entry shell the game boots into: title + Start /
+      (later Continue) / Quit. Small, but it's what makes the build feel like a *game* you hand to a
+      friend rather than a scene that just starts. Boots before `Loadout.tscn`.
+
+**Phase B — the roguelite frame + camp (Scenes 2–3):** run loop, economy, persistence.
+- [x] **Win conditions beyond elimination** — reach-the-victory-tile DONE (win-objective tiles +
+      `BattleBase` win check). The **"kill a specific target"** (summoner) variant is still net-new.
+- [ ] **Reward-pick screen + thin `RunState`** — pick an upgrade after a battle; party carries over.
+      Overlaps the "Battle → reward → next battle loop" item below; `PartyLoadout` is the thin first cut.
+- [ ] **Cutscene / scripted-scene system** — *net-new.* Scene 2 (time-wizard reveal + hub). Rides on
+      the dialog system above.
+- [ ] **Scripted-encounter hooks** — forced-loss + dialog-on-turn/event triggers for the Scene 1
+      tutorial (rigged to end in defeat while still teaching).
+- [ ] **[DEMO] In-between-battles camp / hub** — the "between runs" area (`DEMO_PLAN.md` Scene 2):
+      a **shop** to buy items/gear with a currency, and **unit upgrades** (spend to level up — see the
+      "EXP → level-up loop" item under "Then"). This is the fuller build-out of the `RunState`/reward
+      thread above; `PartyLoadout` is the thin first cut it grows from.
+- [ ] **[DEMO] Job system — at least functional** — transfer a character between jobs/classes and
+      **level them up within a job** (the FFT per-job banking machinery — `Unit.level_history` — is
+      already built; this exposes it). Depends on the EXP→level-up loop; pairs with the
+      "Promotion / job-upgrade tree" item under "Then".
+- [ ] **[DEMO] Equipment gain during battles** — loot/rewards drop gear into the party inventory
+      (feeds the shop/loadout economy). Ties the reward-pick screen to real items.
+- [ ] **[DEMO] Finite inventory** — inventory is a **managed resource**, not the infinite catalog
+      `PartyLoadout` exposes today. Caps + acquisition (loot/shop) make gear choices meaningful.
+- [ ] **[DEMO] Save / load games** — persist `RunState` (party, jobs, inventory, run progress) to
+      `user://` so a run survives quitting and can be continued from the title screen. Superset of the
+      "Persist loadouts to disk" polish item below (which `RunState` would own).
+- [ ] **[DEMO] Permadeath / unit-down rule (design decision)** — decide + implement what happens to a
+      unit downed in battle *during a run*: gone for the rest of the run (roguelite permadeath), or
+      revived/healed back at camp? Affects tension, the bench, and the reward economy. Note Scene 1
+      kills your unit **by script**, so the tutorial-death path is separate from the run rule. Capture
+      the decision in `docs/DECISION_LOG.md` when made.
+
+**Phase C — the reveal centerpiece (Scene 4):** the payoff, and the deep work.
+- [ ] **Mid-battle spawn + `TurnManager` register** — battle continues after a "win"; new enemies
+      enqueue. Small addition.
+- [ ] **Time-stop on the killing blow** — freeze presentation mid-resolve; leans on the existing
+      mechanics-vs-presentation split. Contained.
+- [ ] **★ Faces — Layer B gameplay (THE LONG POLE)** — enemies walking the edges / sideways on
+      warped walls, the camera dropping under the map. This is the deferred coordinate-core work
+      (gravity re-point, per-face movement, under-map camera) that the whole climax depends on. See
+      the **Phase 5 floating/overhead-tiles** item below (the Layer A model exists; this is Layer B).
+      *Risk:* everything else in the demo is contained; this isn't. **Consider a cheap throwaway
+      face spike to de-risk it before authoring Scene 4** (`DEMO_PLAN.md` §3 note).
+- [ ] **Underside authoring — lava pentagram on slate** — bottom-cap tiles / authored underside
+      (Layer A slice) for the reveal.
+
+**Phase S — shell & game-feel (cross-cutting; the "hand it to a friend" layer):** none of these are
+tied to one scene — they're what make the build read as a *finished game* rather than a scene that
+starts. Easy to defer and regret; sequenced here so they aren't forgotten. Most share the UI-theme /
+menu-polish work (see "★ Global UI theme system" under Polish).
+- [ ] **[DEMO] Audio — SFX + music** — *net-new; nothing exists yet.* The biggest feel lever: even
+      placeholder hit / menu-blip / footstep SFX + one **battle** music loop + one **camp** loop
+      transform how the demo lands. Needs an `AudioStreamPlayer` layer + a tiny sound-bank; wire the
+      obvious combat/menu events first. Add a **mute** toggle (see settings below).
+- [ ] **[DEMO] Pause / quit-to-title / retry** — a pause menu (Resume / Settings / Quit to title) and
+      a **retry** path. Today the lose screen holds until the app is killed and there's no restart;
+      a shareable build needs to pause mid-battle, bail to the title, and retry after a loss (Scene 1
+      is a *scripted* loss, so retry/continue matters there too).
+- [ ] **[DEMO] Player camera rotate + zoom** — expose FFT-style **90° rotate** + zoom to the player so
+      tall terrain can't permanently hide a unit/tile. `CameraController` already owns the framing but
+      rotation isn't player-driven. *Possibly demo-blocking for readability, not just polish.*
+- [ ] **[DEMO] Scene transitions (fade-to-black)** — a reusable fade between Loadout → battle → camp →
+      cutscene instead of hard cuts. Cheap (one `CanvasLayer` + `ColorRect` + tween) and a big jump in
+      perceived polish; also hides scene-load hitches.
+- [ ] **[DEMO] Minimal settings screen** — volume / **mute** + fullscreen / windowed at least. Small,
+      but expected; pairs with audio. Reachable from title + pause.
+- [ ] **[DEMO] How-to-play / controls reference** — a controls overlay or title-screen page so friends
+      know the keys. The Scene 1 tutorial teaches *battle* basics; this covers the rest (camera,
+      cancel, menus).
+- [ ] **[DEMO] On-screen objective + turn/round indicator** — a small "Objective: reach the gold
+      tile" banner + a round counter so win conditions are legible (`DEMO_PLAN.md` flags
+      reveal-readability as a risk — beats 4–6 must teach "kill the summoner" without a prompt).
+      Distinct from the turn-**order** HUD under Polish (who acts next); this is *what/when the fight
+      is won*.
+- [ ] **Build-version watermark + a log** — a tiny version string on screen (+ a `user://` log) so a
+      friend's bug report says which build and, ideally, ships a readable log. Minor, practical for
+      gathering feedback.
+
+_Not sequenced here (owner's call, deliberately out of TODO): branch/merge hygiene for
+`update-maps-and-tiles`._
+
 ### Map & tiles overhaul (current focus — branch `update-maps-and-tiles`)
 Goal: smaller, more interesting maps and real terrain-type gameplay, so playtesting feels
 better. Sequenced so the **saved map format is the linchpin** — once it exists, variable
@@ -197,11 +307,20 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       remaining:** ~~visual authoring UI~~ + a designer "quick-test" hook (save → launch `Main`).
       **Phase 3a UI DONE:** separate **`EncounterBuilder`** tool (`scenes/EncounterBuilder.tscn`, F6)
       on a new shared **`AuthoringScene`** base (extracted from `MapDesigner` too, via scene
-      inheritance) — tools 1/2/3 place enemies (red token + inspector: class/level; `C` cycles class)
-      and paint deploy/win regions; M add map, O open, S save encounter (+ external `MapSequence`).
-      `EnemyPlacement.face` reserved for face-aware placement. Battle shows a gold glowing outline on
-      win tiles (`Battlefield.show_objective_tiles`). **Still TODO:** the MAPS **sequence panel**
-      (multi-map chain + per-transition turns) + the quick-test hook.
+      inheritance) — tools 1/2/3 place enemies (red token + inspector: class/level, delete; `C` cycles
+      class) and paint deploy/win regions; M add map, O open, S save encounter to `assets/encounters/`
+      (+ an external, reusable `MapSequence` under `assets/sequences/`, referenced by path not embedded
+      — fixed via `take_over_path`). `EnemyPlacement.face` reserved for face-aware placement.
+      **Runtime side, verified by F5 on a hand-built encounter (`wall_moat_test`):** `BattleBase`
+      loads the encounter's first map, deploys the party into the `deploy` region, spawns the enemy
+      roster, and wins on `ally-ends-turn-on-win-tile` OR elimination; win tiles show a gold glowing
+      pulse outline (`Battlefield.show_objective_tiles`). Also fixed here: rolled units could spawn
+      unarmed when an aptitude roll dipped a stat below a weapon's requirement — class default kits are
+      now **force-equipped** (`Unit.equip(item, force=true)`). **Still TODO for the builder:** the
+      MAPS **sequence panel** (multi-map chain UI + per-transition "turns between" + add/remove/reorder
+      + same-size warning) and the designer **quick-test hook** (save → set autoload → launch the
+      battle). Runtime chaining of a multi-map sequence on shifts is separate — see the
+      **Map-sequence runtime** item below.
       **Phase 3b (later):** per-stat overrides, named-character/boss placements, WYSIWYG tokens.
       **Phase 4 (later):** multi-state editing. **Phase 5 (later) — floating/overhead tiles (doorways,
       arches, bridges):** let a tile stack carry a gap — "hide tiles in height range A→B at (X,Z)
@@ -255,6 +374,17 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
 - [ ] **Line-of-sight + projectile collision** — tall terrain blocks arrows/fireballs and
       targeting (a grid/height LoS check between attacker and target; projectiles respect it).
       Most novel/complex; its own chunk.
+- [ ] **Map-sequence runtime — chain authored maps on the time-shift (+ variable-size shift)** —
+      *the deferred runtime half of the encounter builder's MAPS panel.* Today a **single** map's
+      height-state sequence already shifts live at runtime (`DemoMap` grassland→canyon→desert via
+      `advance_shift`). Still TODO: load through a **`MapSequence` of different authored map `.tres`
+      files** during a battle — swap to the next map on each shift and drive the **per-transition
+      "turns between"** cadence through `TurnManager.register_map_transition_speed`. **Variable-size
+      shift (deferred, harder):** when chained maps differ in size, align them by the `MapSequence`
+      **anchor corner** (NW/NE/SW/SE — already stored in `MapSequence.anchors`/`Corner`, ignored while
+      the chain is uniform-size) and apply **stranded-unit falloff** for units left off the new map's
+      footprint (the "fun escalation" of units falling as the world shrinks). See
+      `scripts/maps/MapSequence.gd` + `docs/DECISION_LOG.md` (2026-06-30).
 - [~] **Author new demo maps** — small, deliberately interesting battle maps (chokepoints, high
       ground, mixed terrain) as height-state sequences; retire/retune the procedural 24×24 demo cycle.
       **Done so far:** `SmallDemoMap.gd` — a 12×12 procedural cousin of `DemoMap` with a hill in all
@@ -337,6 +467,16 @@ between-battles loop, and only **then** open the big game-flow discussion. Don't
       cinematic. Owner's jump-based formula was chosen over the older `temporal_resist` idea noted here.
 - [ ] Promotion / job-upgrade tree — a separate resource (which class unlocks which, at
       what level); deliberately kept out of `ClassDef`. See `docs/STATS.md`.
+- [ ] **EXP → level-up loop** — EXP *tracking* is done (`Unit.current_exp` + `EXP_PER_LEVEL`
+      placeholder, shown in the stat block), but actually **spending it to gain a level is not wired**
+      (`Unit.gd` defers it: "spending it on a level-up is wired when [the leveling system lands]").
+      Needs: a real leveling curve (retire the flat `EXP_PER_LEVEL` placeholder), the level-up event
+      that banks class growth into `Unit.level_history` (the FFT per-level job-banking machinery
+      already exists), and awarding EXP from combat. Pairs with the promotion/job tree above.
+- [ ] **Spell-learning system** — `Unit.known_spells` is seeded from class defaults and never grows;
+      `Unit.gd` defers "a real spell-learning/job system will later add to a unit's list independently
+      of `weapon_type`." Let units learn new spells (via level-up / job / loot). Folds into the
+      leveling + job-tree work above.
 
 ## Architecture — toward a reusable `Battle.tscn`
 
@@ -381,6 +521,44 @@ The move to **node composition + signals** as the battle architecture landed wit
 `TurnManager` extraction — logged in `docs/DECISION_LOG.md` (2026-06-21).
 
 ## Polish / nice-to-have
+
+### ★ Game-feel & UX — demo-blocking pass (do before showing anyone)
+Audited 2026-07-01 against the code. These are the interaction/feel gaps that would make the
+`DEMO_PLAN.md` slice read as unfinished to a first-time player. Sequenced ahead of the general
+polish backlog below; each notes the seam it builds on. Tag: **[DEMO]** = wanted before sharing.
+- [ ] **[DEMO] Accuracy vs dodge + hit-chance confirmation.** `CombatResolver.hit_chance` still
+      mocks `1.0` and `StatBlock.evasion` / `Equipment.accuracy` are stored+shown but inert. Land the
+      real formula (≈ `attacker_accuracy × weapon.accuracy − target_dodge`) at that one named seam,
+      then add a **target-confirm popup** showing the % before committing an attack (player picks a
+      target → see odds → confirm/cancel). Core tactics feel; the data hooks are already plumbed
+      (`Unit.weapon_accuracy_for`, the reserved `evasion` field).
+- [ ] **[DEMO] Visible turn-order HUD.** Nothing renders the CT queue today. Add an FFT-style
+      "up next" readout driven by `TurnManager`'s speed/CT order so the player can see who acts when.
+      Net-new view; `TurnManager` already owns the ordering.
+- [ ] **[DEMO] Mouse-driven menus.** `ActionMenu` / `SpellMenu` are keyboard-only (Up/Down/Enter);
+      the builder tools are already mouse-driven. Add click-to-select + hover-highlight to the battle
+      menus (and ideally click-to-target on the board) so the game is playable by mouse.
+- [ ] **[DEMO] Menu + background look pass (no more black boxes).** A light styling pass so the HUD /
+      menus read as designed rather than placeholder `Panel`s, plus a **more appealing battle
+      background** (even a rough skybox/gradient beats the void). Folds with "Menu polish pass" and
+      "★ Global UI theme system" below — do the theme extraction as the vehicle.
+- [ ] **[DEMO] Character portrait integration.** Wire the committed `assets/ui/portraits/` art into
+      the Loadout frame (replacing the "PORTRAIT" placeholder `Panel`) and surface the meta-god mood
+      frames. Same work as the portrait half of the "Menu/UI cleanup + portrait art" item under Next.
+- [ ] **[DEMO] Combat balance pass.** Tune damage / HP / MP / speed in real fights (the
+      "Combat balance pass — playtest tuning" item below, promoted): the demo battles need to *feel*
+      right, not just resolve.
+- [ ] **[DEMO] Line-of-sight + projectile collision.** Tall terrain blocks arrows/fireballs +
+      targeting (the item under "Map & tiles overhaul"). Demo-relevant for ranged fairness; promoted
+      here so it isn't buried.
+- [ ] **[post-demo] Improved enemy AI.** Today's v1 (`BattleBase._take_enemy_turn` +
+      `_enemy_choose_attack` / `_enemy_move_toward`) works but has the known re-kiting limitation
+      (a ranged enemy with no in-range tile just walks closer, into its own min-range). Smarter
+      target selection + kiting positioning. Nice-to-have, not demo-blocking.
+- [x] **Standing on a damaging surface — DONE.** Confirmed wired: `BattleBase._resolve_hazard` deals
+      `TileTypes.hazard_damage` on-enter (`_apply_hazard_after_move`) **and** at turn start, with
+      lethal-tick handling. (Only lava has non-zero hazard today; quicksand/others are data-ready.)
+
 - [ ] **Battle grid-outline view setting** — a player-toggleable option to show/hide a dark
       outline around every tile edge during battle (off by default). The map builder already
       draws this (always-on, via `EditableBattlefield._rebuild_grid_overlay`, now covering tile
@@ -429,6 +607,22 @@ The move to **node composition + signals** as the battle architecture landed wit
 - [ ] Tune `Unit.MOVE_SPEED` and the step cadence once real maps exist
 
 ## Later / backlog
+- [ ] **Author attacks/abilities as `.tres` data** — `Attack` profiles (melee/arrow/fireball) and the
+      weapon/spell attacks are all **built in code** today (`Attack.physical_melee/physical_ranged/
+      fireball`, `Unit.basic_attack`). `Attack` is already a `Resource` for exactly this reason; the
+      deferred step is authoring abilities as `.tres` files dropped onto classes/units (the same
+      data-driven pattern as `StatBlock`/`ClassDef`), so new weapons/spells are data, not code. Lands
+      naturally with the loot/inventory + job work. See `scripts/combat/Attack.gd`.
+- [ ] **Minor deferred code seams** (small, noted in-code, none demo-blocking):
+      - **`weapon_type` from the equipped weapon** — `Unit.weapon_type` is defaulted from the class
+        (archer→RANGED) "for now"; it should eventually be set by the equipped weapon item so gear
+        drives melee-vs-ranged. See `Unit.gd`.
+      - **`FloatingCombatText` status text** — the floating-number effect is built to also show
+        misses / status procs ("miss", "poison") later, not just damage/heal numbers. See
+        `scripts/FloatingCombatText.gd`.
+      - **Swap the fixed RNG seed to `randomize()`** — `BattleBase` uses a fixed enemy-roll seed so
+        each run spawns identical foes (reproducible while testing); swap to `randomize()` for variety
+        once encounters are authored. See `BattleBase.gd`.
 - [ ] Tile selection + highlight on hover/click
 - [ ] Unit movement tile-to-tile (with movement range based on grid distance + Z cost)
 - [ ] Turn order / turn-based loop

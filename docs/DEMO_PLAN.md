@@ -102,7 +102,7 @@ A quick map so the build order is legible. "Net-new" items are the real new work
 | Core combat feeling good | Battle loop, combat pipeline | Built; needs polish |
 | All dialog + god mocking | **Dialog/textbox system** | **Net-new** |
 | Cutscene (Scene 2) | **Cutscene/scripted-scene system** | **Net-new** |
-| "Reach the victory tile" / "kill the summoner" wins | **Win-condition system** (beyond elimination) | **Net-new** (flagged) |
+| "Reach the victory tile" / "kill the summoner" wins | **Win-condition system** (beyond elimination) | **Reach-tile DONE** (2026-06-30: win-objective tiles + `BattleBase` win check — ally ends turn on a `win` tile OR elimination). "Kill a specific target" (the summoner) variant still net-new. |
 | Upgrade pick after a battle | **Reward-pick screen** + run state | Partial (`PartyLoadout`/RunState thin cut) |
 | "In-between runs" hub | RunState / between-battles layer (GAME_DESIGN §9) | Partial |
 | Time-stop on the killing blow | Freeze presentation mid-resolve | Achievable via existing mechanics/presentation split |
