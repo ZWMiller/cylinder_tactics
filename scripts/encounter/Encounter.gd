@@ -11,10 +11,11 @@
 ## the bag script-friendly is that everything is addressable by NAME — enemies carry an `id`,
 ## and tiles are grouped into NAMED regions — so a script can grab exactly the piece it wants.
 ##
-## Terrain lives in a SEPARATE `MapData` .tres referenced by `map_path`, not embedded, so one
-## map is reusable across many encounters and `MapData`/`Battlefield` stay untouched. This is
-## the concrete first cut of the planned `Encounter` resource (see docs/TODO.md "toward a
-## reusable Battle.tscn").
+## Terrain lives in a SEPARATE, reusable `MapSequence` (its own `.tres` in `assets/sequences/`,
+## itself referencing `MapData` files) — not embedded here — so one map, and one whole chain, can
+## be reused across many encounters while `MapData`/`Battlefield` stay untouched. This is the
+## concrete first cut of the planned `Encounter` resource (see docs/TODO.md "toward a reusable
+## Battle.tscn").
 class_name Encounter
 extends Resource
 
@@ -24,9 +25,11 @@ extends Resource
 const REGION_DEPLOY := "deploy"   ## where the player's party may start (their deploy zone)
 const REGION_WIN := "win"         ## reach-to-win objective tiles (see `has_win_region`)
 
-## `res://` path to the terrain `MapData` this fight is on. The battle loads it via
-## `MapData.load_from(map_path)`. Empty means "no map chosen yet" (an incomplete encounter).
-@export var map_path: String = ""
+## The terrain this fight is on: a `MapSequence` (the ordered map chain + shift cadence). Usually a
+## reference to a shared `assets/sequences/*.tres`, but the typed field also accepts an embedded
+## sub-resource. A static (non-shifting) battle is just a length-1 sequence. `null` / empty means
+## "no map chosen yet" (an incomplete encounter). The battle starts on `first_map_path()`.
+@export var map_sequence: MapSequence
 
 ## The enemies to spawn, each a self-describing `EnemyPlacement` (tile + class + level). Order
 ## is not significant. Players are NOT stored here — they come from the party/`PartyLoadout` and
@@ -41,6 +44,13 @@ const REGION_WIN := "win"         ## reach-to-win objective tiles (see `has_win_
 ## and let this handle the packing. `REGION_DEPLOY` and `REGION_WIN` are the interpreted keys;
 ## any other key is free for per-battle scripts.
 @export var regions: Dictionary = {}
+
+
+## The `res://` path of the map the battle starts on, or `""` if this encounter has no sequence /
+## an empty one. Null-safe convenience over `map_sequence.first_map_path()` so callers needn't
+## guard the (possibly unset) sequence themselves.
+func first_map_path() -> String:
+	return map_sequence.first_map_path() if map_sequence != null else ""
 
 
 ## Return region `name` as a list of tile coordinates (empty if the region is absent). Unpacks

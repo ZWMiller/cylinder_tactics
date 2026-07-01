@@ -1,7 +1,8 @@
-[gd_resource type="Resource" script_class="Encounter" load_steps=6 format=3]
+[gd_resource type="Resource" script_class="Encounter" load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/encounter/Encounter.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/encounter/EnemyPlacement.gd" id="2"]
+[ext_resource type="Resource" path="res://assets/sequences/church_seq.tres" id="3"]
 
 [sub_resource type="Resource" id="EP_1"]
 script = ExtResource("2")
@@ -29,7 +30,7 @@ overrides = {}
 
 [resource]
 script = ExtResource("1")
-map_path = "res://assets/maps/the_church_demo.tres"
+map_sequence = ExtResource("3")
 enemies = [SubResource("EP_1"), SubResource("EP_2"), SubResource("EP_3")]
 regions = {
 "deploy": PackedInt32Array(0, 4, 0, 5, 0, 6),

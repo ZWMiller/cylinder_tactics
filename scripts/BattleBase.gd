@@ -1065,11 +1065,14 @@ func _spawn_roster() -> void:
 ## Enemies are rolled from each placement's class+level, exactly like the demo roster.
 func _spawn_from_encounter() -> void:
 	# Terrain first, so units placed after read the encounter map's heights (spawn Y / liquid sink).
-	var map := MapData.load_from(_encounter.map_path)
+	# We load the FIRST map of the sequence; chaining the rest on shifts (with the per-transition
+	# cadence + variable-size handling) is the deferred sequence-runtime work — see docs/TODO.md.
+	var first_map := _encounter.first_map_path()
+	var map := MapData.load_from(first_map)
 	if map != null:
 		_battlefield.load_map_data(map)
 	else:
-		push_warning("BattleBase: encounter map '%s' missing — keeping the fallback map." % _encounter.map_path)
+		push_warning("BattleBase: encounter map '%s' missing — keeping the fallback map." % first_map)
 
 	# Deploy the party into the `deploy` region, in order. If the encounter defines no deploy zone
 	# (or has fewer tiles than party members), leftover members fall back to their stored tile —
@@ -1087,8 +1090,9 @@ func _spawn_from_encounter() -> void:
 		var foe := StatRoll.random_recruit(placement.klass, placement.level, _rng)
 		_spawn_recruit(placement.tile.x, placement.tile.y, Unit.Allegiance.ENEMY, foe)
 
-	print("BattleBase: loaded encounter (map '%s' %dx%d, %d enemies, deploy %d, win %d)" % [
-		_encounter.map_path, _battlefield.grid_width, _battlefield.grid_height,
+	var seq_len := _encounter.map_sequence.size() if _encounter.map_sequence != null else 0
+	print("BattleBase: loaded encounter (map '%s' %dx%d, seq %d, %d enemies, deploy %d, win %d)" % [
+		first_map, _battlefield.grid_width, _battlefield.grid_height, seq_len,
 		_encounter.enemies.size(), deploy.size(), _encounter.region(Encounter.REGION_WIN).size()])
 
 
