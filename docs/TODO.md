@@ -535,6 +535,13 @@ polish backlog below; each notes the seam it builds on. Tag: **[DEMO]** = wanted
 - [ ] **[DEMO] Visible turn-order HUD.** Nothing renders the CT queue today. Add an FFT-style
       "up next" readout driven by `TurnManager`'s speed/CT order so the player can see who acts when.
       Net-new view; `TurnManager` already owns the ordering.
+- [ ] **[DEMO] Shift preview on button push (the "what-if" terrain view).** Press/hold a key to show
+      what the map becomes after the **next time-shift** — which tiles rise/fall and which units would
+      fall / take damage — then release to return. The core gimmick's key readability lever: it lets
+      the player *plan around* the shift instead of being surprised by it, which the demo leans on to
+      show the shift off. The data already exists (`Battlefield.peek_next_state`); this is the missing
+      view. Detail lives in the "Shift telegraph + hold-to-preview" item under "Later/backlog" and
+      `docs/GAME_DESIGN.md` §4.
 - [ ] **[DEMO] Mouse-driven menus.** `ActionMenu` / `SpellMenu` are keyboard-only (Up/Down/Enter);
       the builder tools are already mouse-driven. Add click-to-select + hover-highlight to the battle
       menus (and ideally click-to-target on the board) so the game is playable by mouse.
@@ -605,6 +612,17 @@ polish backlog below; each notes the seam it builds on. Tag: **[DEMO]** = wanted
 - [ ] Distinguish committed-waypoint tiles from the hover tail in the path preview
       (e.g. a stronger color), and maybe a destination marker
 - [ ] Tune `Unit.MOVE_SPEED` and the step cadence once real maps exist
+- [ ] **Hop a narrow liquid instead of wading (movement refinement, non-demo).** When a unit's path
+      would step **into a liquid tile** (today costs 2 to enter — the wade penalty), but that liquid is
+      only a **single tile wide** (a solid, walkable tile lies directly beyond it in the travel
+      direction, within the jump-height gate), and the unit has **enough remaining movement that
+      landing on the far tile stays within its total move budget**, let it **jump over** the liquid —
+      skipping the liquid-entry penalty — rather than wading in. Touches the Dijkstra `move_cost`
+      pathing (`reachable_tiles` / `find_path` / `classify_path`), the jump-height gate, and the
+      stepped path expansion (`expand_path` / `path_to_world_points`) so the walk visibly clears the
+      gap. Open Qs: what the hop costs in move points (just the far tile's cost?), and auto-hop vs.
+      offer-as-a-choice. Single-tile gaps only for now — wider spans would need a horizontal
+      jump-distance stat (out of scope).
 
 ## Later / backlog
 - [ ] **Author attacks/abilities as `.tres` data** — `Attack` profiles (melee/arrow/fireball) and the
@@ -634,8 +652,9 @@ polish backlog below; each notes the seam it builds on. Tag: **[DEMO]** = wanted
       `TurnManager`, cinematic in `Main`) **and** units now re-settle + take fall damage on the shift
       (see the "Re-settle units + apply fall damage" item above). §4
 - [~] Shift telegraph + hold-to-preview "what-if" view — *basic telegraph done* (the
-      `ShiftCounter` countdown); **still TODO: the hold-to-preview "what-if" terrain view**
-      (`Battlefield.peek_next_state` already exposes the data). See `docs/GAME_DESIGN.md` §4
+      `ShiftCounter` countdown); **still TODO ([DEMO]): the hold-to-preview "what-if" terrain view**
+      (`Battlefield.peek_next_state` already exposes the data) — see the demo-blocking "Shift preview
+      on button push" item under "Game-feel & UX". See `docs/GAME_DESIGN.md` §4
 - [ ] Time-mage powers (accelerate shift, shift one tile early, …) — deferred, see `docs/GAME_DESIGN.md` §5
 
 See `docs/GAME_DESIGN.md` for the full game-design vision and the structural choices
