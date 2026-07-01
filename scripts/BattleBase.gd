@@ -28,6 +28,19 @@ extends Node3D
 ## time, so each `.instantiate()` is just a cheap clone of an already-loaded scene.
 const UNIT_SCENE := preload("res://scenes/Unit.tscn")
 
+## The default music context for a battle: the shared pool of battle themes the `MusicManager`
+## shuffles through, used when a specific battle doesn't set its own `music_playlist` below. Loaded at
+## runtime (not `preload`) so this script parses even before the playlist asset is generated.
+const DEFAULT_BATTLE_PLAYLIST := "res://assets/music/battle_playlist.tres"
+
+## The music context for THIS battle. Left null (the default), the fight scores itself from the shared
+## battle pool above. A specific battle overrides it WITHOUT touching this base or overriding a method:
+## a `BattleBase` subclass (e.g. `Battle6`) sets `music_playlist = preload(".../boss_playlist.tres")`
+## before calling `super._ready()`, or you drag a playlist into this slot in the Inspector on the
+## battle's scene. Switching pools MID-fight (the demo's god reveal) is a separate call the subclass
+## makes directly: `MusicManager.play_playlist(boss_playlist)`.
+@export var music_playlist: MusicPlaylist = null
+
 ## The player roster (who the squad is) now lives on the `PartyLoadout` autoload, shared with the
 ## pre-battle loadout menu so both scenes agree on the party and its gear. `Main` reads
 ## `PartyLoadout.party` when spawning (see `_ready`) instead of holding its own list.
@@ -261,6 +274,10 @@ var _stats_pinned: bool = false
 ## Battlefield's tiles already exist. Build the HUD, spawn the roster, then start the
 ## first player unit's turn (which opens the menu).
 func _ready() -> void:
+	# Kick the soundtrack off first thing, so it plays under the whole intro. The MusicManager
+	# autoload owns playback and survives the Loadout→Main scene swap; we just tell it which pool.
+	_start_battle_music()
+
 	_menu = ActionMenu.new()
 	add_child(_menu)            # runs ActionMenu._ready synchronously, building its UI
 	# Options are built per active unit (casters get "Spell"), so we don't build a fixed list here.
@@ -309,6 +326,20 @@ func _ready() -> void:
 	await _camera.play_intro_orbit()
 	await get_tree().create_timer(INTRO_HOLD).timeout
 	_turn_manager.begin()
+
+
+## Hand this battle's playlist to the `MusicManager` so the fight is scored from load. Uses the
+## battle's own `music_playlist` when set, otherwise the shared `DEFAULT_BATTLE_PLAYLIST` pool. The
+## manager crossfades tracks and (for finite clips) advances through the pool on its own; `_end_battle`
+## fades it back out. Warns rather than crashing if neither playlist resolves.
+func _start_battle_music() -> void:
+	var playlist := music_playlist
+	if playlist == null:
+		playlist = load(DEFAULT_BATTLE_PLAYLIST) as MusicPlaylist
+	if playlist != null:
+		MusicManager.play_playlist(playlist)
+	else:
+		push_warning("BattleBase: no music_playlist set and default missing at %s — running without music." % DEFAULT_BATTLE_PLAYLIST)
 
 
 ## Godot lifecycle hook: runs every frame. Drives the hover-to-inspect panel — after
@@ -930,6 +961,7 @@ func _check_battle_end() -> void:
 ## celebration plays on its own).
 func _end_battle(win: bool) -> void:
 	_game_over = true
+	MusicManager.fade_out()   # wind the battle track down to silence under the end cinematic
 	_menu.set_menu_visible(false)
 	_spell_menu.set_menu_visible(false)
 	_status_panel.hide_panel()

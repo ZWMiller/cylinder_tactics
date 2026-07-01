@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="MusicTrack" format=3]
+
+[ext_resource type="Script" path="res://scripts/audio/MusicTrack.gd" id="1_xaimu"]
+[ext_resource type="AudioStream" path="res://assets/music/battle_music/Eminor-Clockworks-Gmajor.mp3" id="2_fe7pu"]
+
+[resource]
+script = ExtResource("1_xaimu")
+track_name = "Eminor Clockworks"
+stream = ExtResource("2_fe7pu")
+loop_offset = 8.2
+loop_count = 1
+volume_db = -4.0

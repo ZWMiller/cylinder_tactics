@@ -55,7 +55,8 @@ The owner strongly prefers heavy documentation. Hold to this consistently:
 - Boot scene: `scenes/Loadout.tscn` (the `run/main_scene` in `project.godot`) — the pre-battle
   loadout menu, which then launches `scenes/Main.tscn` (the battle; a thin `Main extends BattleBase`).
 - Authoring tools are their own scenes, run with **F6**: `scenes/MapDesigner.tscn` (terrain) and
-  `scenes/EncounterBuilder.tscn` (fights); both share `scenes/AuthoringScene.tscn` as a base.
+  `scenes/EncounterBuilder.tscn` (fights) share `scenes/AuthoringScene.tscn` as a base;
+  `scenes/MusicTuner.tscn` (per-track loop/start/volume tuning) is a standalone `Control` (see `docs/MUSIC.md`).
 
 ## Working conventions
 

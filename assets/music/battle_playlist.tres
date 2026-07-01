@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="MusicPlaylist" format=3]
+
+[ext_resource type="Script" path="res://scripts/audio/MusicPlaylist.gd" id="1_tkq4k"]
+[ext_resource type="Script" path="res://scripts/audio/MusicTrack.gd" id="2_wkvdp"]
+[ext_resource type="Resource" path="res://assets/music/battle_music/dirge_at_sea.tres" id="3_7i3ed"]
+[ext_resource type="Resource" path="res://assets/music/battle_music/eminor_clockworks.tres" id="4_gcb5r"]
+[ext_resource type="Resource" path="res://assets/music/battle_music/moving_on_boss.tres" id="5_03cre"]
+[ext_resource type="Resource" path="res://assets/music/battle_music/tactical_strike.tres" id="6_sdlcj"]
+
+[resource]
+script = ExtResource("1_tkq4k")
+playlist_name = "Battle"
+tracks = Array[ExtResource("2_wkvdp")]([ExtResource("3_7i3ed"), ExtResource("4_gcb5r"), ExtResource("5_03cre"), ExtResource("6_sdlcj")])

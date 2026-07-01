@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="MusicTrack" format=3]
+
+[ext_resource type="Script" path="res://scripts/audio/MusicTrack.gd" id="1_ndtoc"]
+[ext_resource type="AudioStream" path="res://assets/music/battle_music/moving_on_boss_theme.mp3" id="2_fcdl3"]
+
+[resource]
+script = ExtResource("1_ndtoc")
+track_name = "Moving On (Boss)"
+stream = ExtResource("2_fcdl3")
+loop = false
+loop_count = 0
+volume_db = 5.0

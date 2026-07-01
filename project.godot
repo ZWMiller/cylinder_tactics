@@ -19,6 +19,7 @@ config/icon="res://icon.svg"
 
 PartyLoadout="*res://scripts/PartyLoadout.gd"
 UiScale="*res://scripts/UiScale.gd"
+MusicManager="*res://scripts/audio/MusicManager.gd"
 
 [display]
 

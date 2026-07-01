@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="MusicTrack" format=3]
+
+[ext_resource type="Script" path="res://scripts/audio/MusicTrack.gd" id="1_pnv3f"]
+[ext_resource type="AudioStream" path="res://assets/music/battle_music/tactical_strike_default_battle.mp3" id="2_ua674"]
+
+[resource]
+script = ExtResource("1_pnv3f")
+track_name = "Tactical Strike"
+stream = ExtResource("2_ua674")
+start_position = 8.1
+loop_offset = 8.1
+loop_count = 1
+volume_db = -1.0
