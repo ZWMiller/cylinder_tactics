@@ -182,9 +182,22 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       enemies (class/weapon/armor/level + per-stat HP/MP/Speed/Move overrides), named characters/
       bosses, a player **start zone**, and **win-objective tiles** (reach-the-tile victory, not just
       elimination); save the whole fight and quick-load to test. Visual front-end for the
-      `Encounter` resource; key open question = embed in `MapData` vs a separate `Encounter`
-      that references the map. See `docs/map_builder_implementation_plan.md` §10. **Phase 4
-      (later):** multi-state editing. **Phase 5 (later) — floating/overhead tiles (doorways,
+      `Encounter` resource. **Data-model decided (2026-06-30):** a separate `Encounter` resource
+      (pure named-data bag, script→data) that references a `MapData` by path — NOT embedded in
+      `MapData`. See `docs/map_builder_implementation_plan.md` §10 + `docs/DECISION_LOG.md`.
+      **Phase 3a backend DONE (unwired to any UI yet):** `Encounter`/`EnemyPlacement` resources
+      (`scripts/encounter/`, enemy `id`s + named `deploy`/`win` regions + reserved `overrides`);
+      the old `Main` "God node" extracted to **`BattleBase`** (`class_name`, history-preserving
+      `git mv`) with `Main` now a thin `extends BattleBase` (the first example of the pattern a
+      future `Battle5 extends BattleBase` follows); `BattleBase` reads an `Encounter` via the
+      overridable `_resolve_encounter()` seam (loads its map with new `Battlefield.load_map_data`,
+      spawns enemies, deploys the party into `deploy`) and the **win condition** now honors a `win`
+      region (ally ends turn on a goal tile OR all enemies dead; no region → elimination). Verified
+      by hand-authoring `assets/encounters/test_church.tres` and playing it (F5). **Phase 3a
+      remaining:** the visual authoring UI in the designer (Encounter mode: place/select enemies +
+      inspector, paint deploy/win regions) + a designer "quick-test" hook (save → launch `Main`).
+      **Phase 3b (later):** per-stat overrides, named-character/boss placements, WYSIWYG tokens.
+      **Phase 4 (later):** multi-state editing. **Phase 5 (later) — floating/overhead tiles (doorways,
       arches, bridges):** let a tile stack carry a gap — "hide tiles in height range A→B at (X,Z)
       but still show the rest above it" — so you can author doorways, arches, and overpasses. This
       needs **two (or more) separate tiles at the same (X,Z)** (a walkable lower deck + a span

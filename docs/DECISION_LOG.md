@@ -6,6 +6,42 @@ why, and any alternatives rejected.
 
 ---
 
+## 2026-06-30 — Encounter data model (script→data bag) + `BattleBase` inheritance + win condition
+
+**Context:** Phase 3 of the map/tiles work turns the designer into an *encounter builder* — author a
+whole fight (enemies, deploy zone, objective tiles) and quick-load it to playtest. Two things had to
+be settled before building: how the encounter is stored, and how a *specific* battle's scripted logic
+(the meta-god taunts, a moving win tile, a puzzle — see GAME_DESIGN.md §11) attaches to it.
+
+**Decision 1 — `Encounter` is a separate, pure named-data resource; the code owns the data.** A new
+`Encounter` (`scripts/encounter/Encounter.gd`) references a `MapData` by `map_path` (terrain stays
+reusable and untouched) and holds enemy placements + named tile regions. It contains **no logic and
+no `battle_script` field** — the reference points *script → data*, the normal direction: a battle
+script LOADS an `Encounter` and reads it. A plain fight uses the generic base; a scripted fight is a
+subclass that adds behavior in code. What makes the bag script-friendly is that everything is
+**addressable by name** — enemies carry an optional `id`, tiles live in **named regions** (`deploy`,
+`win`, plus any script-defined ones) — so a per-battle script grabs exactly the piece it wants
+(`get_enemy("god_avatar")`, `region("levers")`) instead of by fragile coordinates. This means the
+scripted-battle future needs **zero format change**: same `Encounter`, a new script that reads it.
+*Rejected:* embedding the encounter in `MapData` (couples terrain to one fight, breaks map reuse) and
+putting a `battle_script` pointer in the data (backwards — the owner correctly pushed for code→data).
+
+**Decision 2 — `BattleBase` as the reusable coordinator; concrete battles inherit it.** The old single
+`Main.gd` "God node" was renamed (history-preserving `git mv`) to `BattleBase` (`class_name`); `Main`
+is now a thin `extends BattleBase` and stands as the first, simplest example of the pattern. A future
+scripted fight is `Battle5 extends BattleBase` that loads `Encounter5` and overrides hooks. (`Main` is
+not a reserved Godot name — `Main.tscn` is only special as `project.godot`'s `run/main_scene`.) The
+reactive-scripting capability itself — overridable hooks / signals, pausable attack animations — is
+NOT built in Phase 3; it rides on the later `Battle.tscn` extraction. Phase 3 only makes the data
+*ready* for it.
+
+**Decision 3 — win condition.** If an encounter has a non-empty `win` region: the player wins when an
+**ally ends its turn on a win tile OR all enemies are dead**. If there is no `win` region: today's
+**all-enemies-dead** elimination rule, unchanged. (Reaching the objective is checked at end-of-turn,
+not mid-move.)
+
+---
+
 ## 2026-06-29 — Map depth modes: Auto (derived underside) vs Sculpted (authored floor)
 
 **Decision:** A map carries a per-map **depth mode** (`MapData.DepthMode` = `AUTO` | `SCULPTED`),

@@ -1176,6 +1176,35 @@ func _adopt_dimensions_from_states() -> void:
 	grid_height = (states[0][0] as Array).size()
 
 
+## Replace the currently-shown map with `data` (a saved `MapData`) and rebuild from scratch.
+## The battle coordinator calls this at runtime to load an `Encounter`'s map: the scene's own
+## `_ready` already built the fallback demo map (a child readies *before* its parent), so an
+## encounter map is loaded by tearing that down and re-running the same resolve → adopt → build
+## → render path `_ready` uses. Resets the view to the first state.
+##
+## (The map designer has its own `EditableBattlefield.load_states` for the nested-form New/Load
+## path; this base method is the MapData-driven twin the main game needs and does not touch it.)
+func load_map_data(data: MapData) -> void:
+	# Free the existing per-tile root nodes (recovered from each tile's `earth` mesh's parent, so
+	# no extra bookkeeping is needed). `free()` not `queue_free()` so the new tiles — which reuse
+	# the same "Tile_x_z" names — don't transiently collide with the old ones still in the tree.
+	for column in _tiles:
+		for refs in column:
+			var root: Node = refs["earth"].get_parent()
+			if is_instance_valid(root):
+				root.free()
+	_tiles = []
+
+	# Adopt the new data exactly as `_ready` resolves a `map_data` (size + depth mode come from it).
+	map_data = data
+	states = data.to_states()
+	_sculpted_depth = data.depth_mode == MapData.DepthMode.SCULPTED
+	_current_index = 0
+	_adopt_dimensions_from_states()
+	_build_tiles()
+	render_state(_current_index)
+
+
 ## Create the per-tile geometry once: for every grid cell, a small root node
 ## holding an "earth" column mesh and a "surface" cap mesh. Sizes/colors are left
 ## to `render_state`, which runs immediately after and on every shift.

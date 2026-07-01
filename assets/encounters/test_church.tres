@@ -1,0 +1,37 @@
+[gd_resource type="Resource" script_class="Encounter" load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://scripts/encounter/Encounter.gd" id="1"]
+[ext_resource type="Script" path="res://scripts/encounter/EnemyPlacement.gd" id="2"]
+
+[sub_resource type="Resource" id="EP_1"]
+script = ExtResource("2")
+id = ""
+tile = Vector2i(11, 4)
+klass = 0
+level = 1
+overrides = {}
+
+[sub_resource type="Resource" id="EP_2"]
+script = ExtResource("2")
+id = ""
+tile = Vector2i(11, 6)
+klass = 1
+level = 1
+overrides = {}
+
+[sub_resource type="Resource" id="EP_3"]
+script = ExtResource("2")
+id = ""
+tile = Vector2i(11, 8)
+klass = 2
+level = 1
+overrides = {}
+
+[resource]
+script = ExtResource("1")
+map_path = "res://assets/maps/the_church_demo.tres"
+enemies = [SubResource("EP_1"), SubResource("EP_2"), SubResource("EP_3")]
+regions = {
+"deploy": PackedInt32Array(0, 4, 0, 5, 0, 6),
+"win": PackedInt32Array(8, 6)
+}
