@@ -457,10 +457,12 @@ func can_equip(item: Equipment) -> bool:
 
 
 ## Equip `item` into its slot and recompute stats (its modifiers may change them). Returns false
-## without changing anything if requirements aren't met. A two-handed weapon fills both hands; a
-## one-hander bumps off a held two-hander first, then takes the first free hand (else the main).
-func equip(item: Equipment) -> bool:
-	if not can_equip(item):
+## without changing anything if requirements aren't met — UNLESS `force` is set, which bypasses the
+## requirement gate (used for a class's own default kit, which must always be wieldable by that
+## class). A two-handed weapon fills both hands; a one-hander bumps off a held two-hander first,
+## then takes the first free hand (else the main).
+func equip(item: Equipment, force: bool = false) -> bool:
+	if not force and not can_equip(item):
 		return false
 	match item.slot:
 		Equipment.Slot.HAND:
@@ -874,17 +876,18 @@ static func default_loadout_for_class(klass: int) -> Array[Equipment]:
 	return kit
 
 
-## Clear any held gear and equip this unit's class default loadout. Called at spawn AFTER stats
-## exist (equip checks requirements against `max_stats`). Items whose requirements aren't met are
-## silently skipped — e.g. a rolled enemy mage that rolled below the staff's MAG floor simply
-## casts unarmed (power 1.0) rather than crashing.
+## Clear any held gear and equip this unit's class default loadout. Called at spawn. The default kit
+## is FORCE-equipped (bypassing the requirement gate): a class's own starting weapon must always be
+## wieldable by that class, so a rolled unit whose random aptitude dipped a stat below the weapon's
+## floor (e.g. an archer rolled under the bow's speed-7 gate) still spawns armed rather than empty-
+## handed. The requirement gate still applies everywhere else (the loadout menu, cross-class equips).
 func _apply_default_loadout() -> void:
 	hands = [null, null]
 	armor_head = null
 	armor_chest = null
 	armor_boots = null
 	for item in default_loadout_for_class(unit_class):
-		equip(item)
+		equip(item, true)   # force: class defaults are never requirement-gated
 
 
 ## Seat the body's feet at local y=0 and rest the hat on top of the body. Both
