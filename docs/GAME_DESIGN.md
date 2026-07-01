@@ -45,11 +45,12 @@ A **class** defines the *shape* of a unit:
 - movement characteristics (move range, how it pays for Z-height changes),
 - attack profile (range, melee vs. ranged vs. magic).
 
-**Open questions (defer until after prototype):**
-- Are classes fixed per unit, or can a unit change/promote class (FFT job system)?
-  *Leaning: fixed per unit for now; revisit if we want a job system.*
+**Open questions:**
+- ~~Are classes fixed per unit, or can a unit change/promote class?~~ **Resolved (§3):**
+  job-change with **persistent per-level banking** (FFT-style) — reclass swaps the base but
+  keeps the growth banked from earlier jobs.
 - Is the time-mage a **class** or a **special unit** that layers time powers on top
-  of an ordinary class? See §5 — this is the first real "class vs. function" call.
+  of an ordinary class? See §5 — still open, the first real "class vs. function" call.
 
 ---
 
@@ -93,13 +94,13 @@ derived hit chance** (not a D&D single-roll Armor Class): avoidance and toughnes
 **Reserved** (field exists now with a sane default; effects land later):
 - `evasion` — feeds a *hidden* hit-chance check (hit% = f(attacker accuracy, target
   evasion), shown to the player only as a resulting %). Combat ships **deterministic
-  first** (always hit; `damage = atk − def`, floored at 1); the dice come later, but
-  the field exists so the formula has a home.
-- `temporal_resist` — this game's signature stat, since the whole design is built on
-  the time shift. Dual purpose: (1) a save vs. **hostile time magic** (an enemy
-  time-mage targeting this unit — §5), and (2) **fall-damage mitigation** from the
-  environmental shift (§4). Reserved now; the fall-damage hook arrives with the shift
-  re-settle work, ahead of any time powers.
+  first** (always hit; the dice come later), but the field exists so the formula has a
+  home. *Status:* still reserved — `CombatResolver.hit_chance` mocks 1.0 today.
+- `temporal_resist` — this game's signature stat, since the whole design is built on the
+  time shift: a save vs. **hostile time magic** (an enemy time-mage targeting this unit —
+  §5). It *originally* doubled as fall-damage mitigation, but the shipped shift re-settle
+  uses a **jump-based** fall formula instead (see the §4 / §8 note), so `temporal_resist`
+  is now reserved **solely** for time magic and stays inert until those powers land.
 
 **Deferred** (intentionally *not* in the schema yet — noted so they have an obvious
 slot): crit chance, luck, and FFT-style Brave/Faith. The split offense/defense +
@@ -109,12 +110,16 @@ magic that pierces resist); add these only if a concrete need appears.
 **Design guidance:**
 - A unit's stat block is **data**, not hardcoded per scene — consistent with the
   project's code-driven workflow. A class is a **base template**; an individual is a
-  class template **plus per-unit overrides**. (How to *store* this — a custom
-  `Resource` vs. a plain Dictionary — is the next decision; not yet locked.)
-- Fall damage from the time shift (§4) reads from stats (`temporal_resist`, and drop
-  distance), so it can scale or be resisted — never a hardcoded global constant.
-- Damage formulas must respect the small-numbers philosophy above: keep mitigation
-  subtractive and bounded, not a percentage curve that explodes at high values.
+  class template **plus per-unit overrides**. (*Locked:* stored as custom Godot
+  `Resource`s — `StatBlock` / `ClassDef` / `Recruit` — see the subsection below.)
+- Fall damage from the time shift (§4) is computed from **drop distance vs. the unit's
+  `jump`** (`fall_levels − jump`), stat-driven and bounded — never a hardcoded global
+  constant. (This replaced the earlier `temporal_resist`-based idea; see `docs/DECISION_LOG.md`.)
+- Damage formulas must respect the small-numbers philosophy above. The **shipped** model
+  (equipment, `docs/DECISION_LOG.md` 2026-06-23) is **multiplicative** — `offense =
+  round(atk × weapon.power)`, `mitigation = round(def × Σarmor × scale)` — deliberately
+  tuned to keep results in the single/low-double digits, **not** a percentage curve that
+  explodes at high values. (This superseded the subtractive `atk − def` melee first pass.)
 
 ### Leveling & the job system (built 2026-06-21)
 
@@ -157,13 +162,14 @@ be exposed, isolated, or lethal after the next shift.
 **Behaviors to support (Now / Later):**
 - **Now:** A shift event fires every N turns and rewrites tile heights from the next
   map state; units re-settle onto their tile's new height; falling units take damage.
-- **Now (telegraph):** The upcoming shift must be **well telegraphed** — the player
-  always knows a shift is coming and roughly when (e.g. a turn counter / countdown,
-  and visual cues on tiles that are about to change).
-- **Now (preview):** A **hold-to-preview** control — while held, show what the map
-  *will* look like after the next shift (which tiles rise/fall, by how much, and which
-  units would fall / take damage). Releasing returns to the current state. This is a
-  read-only "what-if" view, not a committed action.
+- **Now (telegraph) — DONE:** The upcoming shift is telegraphed — a turn-counted
+  countdown (`ShiftCounter` "Shift in: N") plus the pre-shift cinematic. (Per-tile visual
+  cues on tiles about to change are still a nice-to-have.)
+- **Intended-now, still TODO (preview):** A **hold-to-preview** control — while held, show
+  what the map *will* look like after the next shift (which tiles rise/fall, by how much,
+  and which units would fall / take damage). Releasing returns to the current state. A
+  read-only "what-if" view, not a committed action. The data exists (`peek_next_state`);
+  the view was intended for the base prototype but hasn't been built yet (see `docs/TODO.md`).
 - **Later:** Tiles rising under a unit, units pushed off the grid edge, tiles
   appearing/disappearing entirely, hazard tiles — all possible extensions. Keep the
   shift representation general enough to allow them; don't hardcode "height only ever
@@ -218,16 +224,15 @@ basic shift). Documented now only so the systems it touches are built to allow i
 
 ## 6. Turn order (relevant to several systems above)
 
-**Intent:** Turn-based loop driving player and enemy units. Likely **speed/initiative
-based** (FFT-style) rather than strict side-by-side rounds, but not yet decided.
+**Built (`TurnManager`, DECISION_LOG 2026-06-21).** A turn-based loop driving player and
+enemy units, **speed/initiative based** (FFT-style **Charge Time**) rather than strict
+side-by-side rounds: each unit banks `ct`, ticks up by `speed`, acts at 100, and carries
+the overflow — so faster units act *more often*, not merely earlier.
 
-This matters here because the **shift cadence ("every N turns")** has to be defined
-against a concrete notion of "turn" — per-unit activation vs. full round. Pin this
-down when the turn loop is built, and make sure the shift counter and the turn system
-agree on what a "turn" is.
-
-**Open question:** Does the shift count *rounds* (everyone acted once) or *individual
-unit turns*? Decide alongside the turn-order implementation.
+This mattered because the **shift cadence ("every N turns")** has to be defined against a
+concrete notion of "turn". **Resolved:** the shift counts **individual unit turns**
+(completed character activations), *not* full rounds — `TurnManager` fires the shift every
+Nth completed turn (`register_map_transition_speed`, default 10).
 
 ---
 
@@ -238,9 +243,10 @@ texture mapping. This is deliberate: it's a Godot learning project, so we build
 everything out of primitive meshes and materials first and learn the engine before
 touching art. Textures/sprites are a **Later** concern.
 
-**Characters — cylinder + cone "hat":**
-- A unit is a **cylinder** with a **cone on top** as a hat.
-- The **hat (cone) shape/color indicates the class** (soldier vs. archer vs. mage).
+**Characters — cylinder + class "hat":**
+- A unit is a **cylinder** with a **hat on top**.
+- The **hat shape indicates the class** — as built: square/box = soldier, pyramid = archer,
+  cone = mage (not always a cone; the shape is the class channel).
 - The **cylinder body color indicates allegiance** (player vs. enemy).
 - These are two independent visual channels — class reads off the hat, side reads off
   the body — so any class can appear on either side without ambiguity.
@@ -252,10 +258,12 @@ touching art. Textures/sprites are a **Later** concern.
   as **brown "earth"** (the dirt under the surface), so height reads clearly without
   textures.
 
-**Terrain types carry gameplay, not just color (design implication):**
-- A tile's type is **data with gameplay effects**, not merely a paint color. Example:
-  water tiles might **impede movement** (higher move cost or impassable) and/or **block
-  casting** (a mage can't cast while standing in water).
+**Terrain types carry gameplay, not just color (BUILT — `TileTypes` property table):**
+- A tile's type is **data with gameplay effects**, not merely a paint color. This shipped:
+  `TileTypes` holds per-type `move_cost`, `is_liquid`, `can_cast`, `hazard_damage`; movement
+  is Dijkstra over `move_cost`, liquids block casting, and lava deals hazard damage. Types
+  now include DIRT / LAVA / BUILDING / ROOF / QUICKSAND etc. (so "grass/road are cosmetic"
+  below is outdated — terrain is live).
 - So a tile needs (at least) a **height** *and* a **terrain type**; the type feeds
   movement cost, casting legality, and possibly line-of-sight later. Keep tile data
   general enough to hold this from the start — don't model a tile as just a height.
@@ -272,23 +280,24 @@ touching art. Textures/sprites are a **Later** concern.
 
 ## 8. Implications checklist (carry these into the prototype)
 
-Even though most features are deferred, these structural choices should be respected
-now so we don't have to retrofit:
+These structural choices had to be respected from the start so we wouldn't have to
+retrofit. **As of 2026-07 all are honored in code** — kept here as the invariants to
+*preserve*, not as open work:
 
-- [ ] Maps are **data** describing a *sequence* of tile-height states over time, not a
-      single static height array. The base prototype can use a 2-state sequence
-      (before/after one shift) but should not assume only one state exists.
-- [ ] A tile carries **at least a height and a terrain type** — not just a height —
-      since type drives movement cost, casting legality, and color (§7).
-- [ ] The shift system exposes a small **public API**: peek the next state, apply the
-      next shift, and (eventually) apply a single tile early.
-- [ ] Units store grid coordinate decoupled from world position, and re-settle via the
+- [x] Maps are **data** describing a *sequence* of tile-height states over time, not a
+      single static height array (`MapData` / `MapState`; the shift cycles the states).
+- [x] A tile carries **at least a height and a terrain type** — not just a height — and
+      in fact a two-layer (surface + body) type; drives movement cost, casting, color (§7).
+- [x] The shift system exposes a small **public API**: `peek_next_state` / `advance_shift`
+      (apply-a-single-tile-early is still reserved for the time-mage, §5).
+- [x] Units store grid coordinate decoupled from world position, and re-settle via the
       shared grid<->world height helpers when a shift changes their tile's height.
-- [ ] Stats live in **class templates + per-unit data**, queryable by gameplay
-      (movement, combat, fall damage), not hardcoded in scenes.
-- [ ] Fall damage is computed from drop distance and unit stats, not a global constant.
-- [ ] All visuals are **geometry + flat-color materials** (cylinder+cone units, colored
-      boxes, brown earth sides). No sprites or texture mapping in the prototype.
+- [x] Stats live in **class templates + per-unit data** (`ClassDef` + `Recruit`),
+      queryable by gameplay (movement, combat, fall damage), not hardcoded in scenes.
+- [x] Fall damage is computed from drop distance and unit stats (`fall_levels − jump`),
+      not a global constant.
+- [x] All visuals are **geometry + flat-color materials** (cylinder + per-class hat units,
+      colored boxes, brown earth sides). No sprites or texture mapping in the prototype.
 
 ---
 
@@ -535,6 +544,10 @@ and is decided/baked NOW; the deep math is Layer B and is deferred**, built on t
 validated with the finished builder (one-click test fights). Build the builder **once**, face-ready.
 
 **Layer A — face *model* (data / addressing / collision): bake into the current builder pass.**
+*Status: largely built (2026-06/07).* The `Face` enum, face-carrying `EnemyPlacement.face`,
+`(tile, face)` picking, and bottom-cap tiles all exist and default to `TOP`; the remaining
+Layer-A work is the additive **face-authoring UI**. Layer B (below) is still deferred — it's
+the demo's long pole (see `docs/TODO.md` / `docs/DEMO_PLAN.md`).
 - A **`Face` enum** (`TOP, NORTH, SOUTH, EAST, WEST, BOTTOM`); a tile *address* becomes
   `(Vector2i tile, Face face)`, **defaulting `TOP`** everywhere today (the reserve-a-slot-default-it
   pattern used for `evasion`/`temporal_resist` and the shift's reserved behaviors).
@@ -571,3 +584,65 @@ geometry. Lean: per-face *identity* + *addressing/placement data*, not per-face 
 - **Layer B traversal model:** walkable-rim (gravity rotates as you cross an edge) vs. god/ability
   teleport onto a face — drives whether reachability spans faces in one BFS or treats each face as its
   own grid. Decide at Layer B kickoff.
+
+---
+
+## 12. Meta play — subverting player expectation, and the in-game god's direct voice — Later / Open
+
+**Status: Later / vision capture (2026-07-01).** A design *stance* that generalizes §11: treat
+**playing with the player's expectations** as a recurring tool across many battles — not a
+one-time reveal — and personify the meta layer as an **in-game god** that breaks the fourth wall
+to interact with the **player** (not the player's characters) **directly**. §11 (the meta-god
+reveal) is the tentpole *instance* of this stance; this section is the general principle it
+belongs to. **Do not design in earnest until a single battle is fun and the shift ships** (same
+gate as §9 / §11).
+
+### The principle — battles that set up an expectation, then break it
+
+Each such battle teaches or implies a rule, then violates it in a way that is **fair in
+hindsight** (the player could have seen it coming). The subversion is the *content*, not a bug.
+Candidate patterns, authored per encounter:
+- **The rug-pull tutorial** — a "normal" fight that teaches the basics and is **scripted to
+  betray you** (DEMO_PLAN Scene 1: learn the rules, then lose by design).
+- **The lying win condition** — the stated/obvious objective isn't the real one (DEMO_PLAN
+  Scene 4: "kill everything" ≠ win; the real answer is "kill the summoner," discovered in play).
+- **The empty arena** — a fight that appears to have no enemies / no path until the player looks
+  somewhere the game never taught them to (walk around the side to the underside, §11).
+- **Broken conventions** — a later fight that violates a convention every earlier fight
+  established (a disabled menu action, a "dead" enemy that revives, terrain that moves *for* the
+  enemy). Reuses the §11 cheat buckets.
+
+### The god as the vehicle — a direct, fourth-wall voice
+
+The god is the **personification** of the expectation-breaker: it addresses the player, mocks,
+misleads, and (occasionally) hints, in a *Stanley Parable*-style narration. It is the named face
+the impersonal "decay" (§4) becomes at the reveal (§11) — but as a **design device** it can
+recur well beyond that single moment (seeded "glitch" asides before the reveal, running
+commentary after). Route every intervention through the **same data-driven hooks** §11 lists
+(dialogue lines as data, the disabled-action path, the shift re-skin, stat-panel lies) so a "god
+moment" is **authored content in the encounter builder**, not a special case in code.
+
+### Design guidance
+
+- **Use it sparingly.** Over-used, the trick stops surprising and reads as gimmick — or as a
+  bug. Space the big subversions; let ordinary tactics carry most fights.
+- **Fair in hindsight.** Every meta-twist needs a discoverable tell, so the payoff is "I should
+  have seen that," not "that was unfair." The god *mocking the player for not noticing* doubles
+  as the tell (the §11 craft risk).
+- **Content, not one-offs.** Because the weird mechanics are permanent core (§11, decided
+  2026-06-27), an expectation-subversion is a **reusable authored beat** — the demo proves the
+  vocabulary; the campaign reuses it.
+
+### Open questions (defer)
+
+- **Same entity as §11's meta-god, or a broader recurring device?** Lean: the *same* being, but
+  its voice can appear (as glitches / narration) earlier and outlast the single reveal — the
+  reveal is when it stops hiding, not its first or last appearance.
+- **Always present vs. introduced at the reveal** — does the god narrate (subtly) from the first
+  battle, or only exist after the mid-game rug-pull?
+- **Antagonist-only, or unreliable ally?** Does it ever genuinely *help* (a real hint, a spared
+  unit) to make the mockery land harder, or is it purely hostile?
+- **One meta-entity or several?** (A pantheon / rival narrators is a content black hole — flag,
+  don't build.)
+- How far the meta-voice reaches *outside* the fiction (commenting on reloads / alt-tab is
+  on-theme; pulling real OS/user data is likely a step too far — mirrors §11's open question).

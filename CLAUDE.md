@@ -9,7 +9,11 @@ for the whole game vision: character classes, class-driven stat blocks, the
 time-degradation map shift (the core gimmick), the shift telegraph/preview, and the
 deferred time-mage powers. It also lists the structural choices to respect *now*
 (maps as a *sequence* of height states, a small shift API, data-driven stats). Then
-skim `docs/TODO.md` (live task list) and `docs/DECISION_LOG.md` (locked-in decisions).
+skim `docs/TODO.md` (live task list, sequenced toward the demo), `docs/DECISION_LOG.md`
+(locked-in decisions), and `docs/DEMO_PLAN.md` (the scripted vertical-slice demo that the
+TODO's "Next" section is now ordered around). Deeper per-component docs also live in `docs/`
+(e.g. `BATTLEFIELD.md`, `STATS.md`, `EQUIPMENT.md`, `LOADOUT.md`, `ENCOUNTER_LAYERING.md`,
+`FACES.md`).
 
 ## Project
 
@@ -48,7 +52,10 @@ The owner strongly prefers heavy documentation. Hold to this consistently:
 
 - **Godot 4.6**, Forward+ renderer, GDScript (native, not C#).
 - Windows rendering driver pinned to **d3d12**; physics engine is **Jolt**.
-- Main scene: `scenes/Main.tscn` (set as `run/main_scene` in `project.godot`).
+- Boot scene: `scenes/Loadout.tscn` (the `run/main_scene` in `project.godot`) — the pre-battle
+  loadout menu, which then launches `scenes/Main.tscn` (the battle; a thin `Main extends BattleBase`).
+- Authoring tools are their own scenes, run with **F6**: `scenes/MapDesigner.tscn` (terrain) and
+  `scenes/EncounterBuilder.tscn` (fights); both share `scenes/AuthoringScene.tscn` as a base.
 
 ## Working conventions
 
@@ -66,18 +73,19 @@ The owner strongly prefers heavy documentation. Hold to this consistently:
 ## Running / testing
 
 - No build step — Godot runs the project directly. In the editor: **F5** runs the
-  project, **F6** runs the current scene.
+  project (boots `Loadout.tscn`), **F6** runs the current scene (e.g. an authoring tool).
 - No test framework is set up yet. If one is added, document the run command here.
+- **Headless parse check** (run from PowerShell, not Bash): `godot --headless --check-only
+  --script <file.gd>` parse-checks one script; after writing a NEW module also do an import pass
+  (`godot --headless --editor --quit`). Note autoloads (e.g. `PartyLoadout`) show false-positive
+  "Identifier not found" under a single-script check — verify those by running the game (F5).
 
-## Architecture (intended)
+## Architecture
 
-The grid is the core abstraction. Planned pieces (not all built yet — check
-`docs/TODO.md` for current status):
-
-- A battlefield generator that takes a 2D array of per-tile heights and spawns one
-  box mesh per tile at the correct `(x, height, z)`, producing terrain with varying Z.
-  See `docs/TODO.md` for the live task list and `docs/DECISION_LOG.md` for rationale.
-- A unit (cylinder) that stores its grid coordinate, decoupled from world position.
-- Grid <-> world coordinate helpers — the most important shared utility: convert a
-  tile to a world position, and a 3D click/ray back to a tile. Movement range, line
-  of sight, and combat will all build on these.
+The grid is the core abstraction (grid <-> world helpers on `Battlefield` are the shared seam:
+tile→world placement and a click/ray→tile pick that movement, LoS, and combat build on). Much of
+the prototype is now built — turn order (`TurnManager`, CT/speed queue), the melee/ranged/magic
+combat pipeline, the map time-shift, a pre-battle loadout + equipment model, and the two authoring
+tools. The current direction is a reusable, data-parameterized battle: `BattleBase` reads an
+`Encounter` resource (map + enemies + deploy/win regions) so each fight is data, not a new script.
+**Check `docs/TODO.md` for what's built vs. pending, and `docs/DECISION_LOG.md` for why.**
