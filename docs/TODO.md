@@ -194,8 +194,14 @@ save), maps saved as a custom `MapData` Resource (`.tres`).
       spawns enemies, deploys the party into `deploy`) and the **win condition** now honors a `win`
       region (ally ends turn on a goal tile OR all enemies dead; no region → elimination). Verified
       by hand-authoring `assets/encounters/test_church.tres` and playing it (F5). **Phase 3a
-      remaining:** the visual authoring UI in the designer (Encounter mode: place/select enemies +
-      inspector, paint deploy/win regions) + a designer "quick-test" hook (save → launch `Main`).
+      remaining:** ~~visual authoring UI~~ + a designer "quick-test" hook (save → launch `Main`).
+      **Phase 3a UI DONE:** separate **`EncounterBuilder`** tool (`scenes/EncounterBuilder.tscn`, F6)
+      on a new shared **`AuthoringScene`** base (extracted from `MapDesigner` too, via scene
+      inheritance) — tools 1/2/3 place enemies (red token + inspector: class/level; `C` cycles class)
+      and paint deploy/win regions; M add map, O open, S save encounter (+ external `MapSequence`).
+      `EnemyPlacement.face` reserved for face-aware placement. Battle shows a gold glowing outline on
+      win tiles (`Battlefield.show_objective_tiles`). **Still TODO:** the MAPS **sequence panel**
+      (multi-map chain + per-transition turns) + the quick-test hook.
       **Phase 3b (later):** per-stat overrides, named-character/boss placements, WYSIWYG tokens.
       **Phase 4 (later):** multi-state editing. **Phase 5 (later) — floating/overhead tiles (doorways,
       arches, bridges):** let a tile stack carry a gap — "hide tiles in height range A→B at (X,Z)
