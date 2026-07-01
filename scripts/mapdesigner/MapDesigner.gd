@@ -11,7 +11,12 @@
 ## (SINGLE / SQUARE / CIRCLE / LINE / HILL with a configurable size + click-drag height),
 ## all routed through `EditableBattlefield.set_tiles` for one redraw per edit. Multi-state
 ## (shift-sequence) editing and the encounter layer are still deferred (Phases 3-4).
-extends Node3D
+##
+## Extends `AuthoringScene` (shared with the Encounter Builder), which owns the common editor
+## scaffolding — the display field, orbit camera + centering, dialog theme, HUD panel, dialog
+## factory, and input guard — exposed via overridable HOOKS (`_initial_states` / `_setup_camera` /
+## `_build_ui` / `_authoring_process`). This file adds only the terrain-editing interaction.
+extends AuthoringScene
 
 # --- Tunables ---------------------------------------------------------------
 
@@ -46,13 +51,8 @@ const DRAG_PX_PER_LEVEL := 16.0
 ## Designer UI font sizes, in design pixels at the project's 1920x1080 base. The
 ## project's `canvas_items` stretch scales them with the window, so these are tuned ONCE
 ## here and stay proportional on every resolution — no per-display fiddling.
-const FONT_HUD := 26      ## the top-left tool / help readout
 const FONT_SWATCH := 22   ## the number-key caption on each terrain swatch
-const FONT_DIALOG := 24   ## all text inside the New / Rename / Save / Load dialogs (via theme)
-
-## Max width (1080p-base px) of the top-left help panel; longer lines wrap so it grows
-## downward instead of sprawling across toward the swatch bar.
-const HUD_PANEL_WIDTH := 520
+# FONT_HUD, FONT_DIALOG, and HUD_PANEL_WIDTH now live on AuthoringScene (shared HUD/dialog sizing).
 
 ## Which tile attribute the mouse edits. RESIZE is the odd one out — it doesn't paint a
 ## tile, it grows/shrinks the grid at the hovered edge (L adds, R deletes; corners do
@@ -88,12 +88,7 @@ const PALETTE: Array[int] = [
 
 # --- Runtime state ----------------------------------------------------------
 
-## The editable battlefield we paint on (created in code so we never build the throwaway
-## DemoMap fallback first). Holds the authoritative map state.
-var _field: EditableBattlefield
-
-## The orbit camera (in the scene); used both for input and for ray-picking tiles.
-@onready var _camera: CameraController = $Camera3D
+# The display/edit field `_field` and the orbit `_camera` are inherited from AuthoringScene.
 
 var _tool: int = Tool.HEIGHT          ## Active editing tool.
 var _brush: int = Brush.SINGLE        ## Active brush shape (see Brush).
@@ -125,9 +120,8 @@ var _drag_levels: int = 0                                ## Current height delta
 var _drag_base: Array = []                               ## Deep snapshot of the state at press (restore source).
 var _drag_last_footprint: Array = []                     ## Tiles written last apply (restored as the footprint shrinks).
 
-## HUD label + the save/open file pickers, all built in code.
-var _hud_layer: CanvasLayer    ## Shared CanvasLayer the HUD text + swatch bar live on.
-var _label: Label
+## The save/open file pickers, built in code. (`_hud_layer` + `_label` are inherited from
+## AuthoringScene; the swatch bar is added onto `_hud_layer` and `_refresh_label` drives `_label`.)
 var _save_dialog: FileDialog
 var _open_dialog: FileDialog
 
@@ -146,38 +140,26 @@ var _new_sculpted_check: CheckBox   ## New dialog: on = Sculpted depth, off = Au
 var _rename_dialog: AcceptDialog
 var _rename_edit: LineEdit
 
-## One shared Theme applied to every dialog Window. Setting its `default_font_size` is
-## what enlarges ALL their text at once — including the file list / buttons / path bar
-## inside the FileDialogs, which we otherwise can't reach to override per-control.
-var _ui_theme: Theme
+# The shared dialog Theme `_ui_theme` is inherited from AuthoringScene.
 
 
-## Build the field (seeded with a blank map), the HUD, and the file dialogs.
-func _ready() -> void:
-	_field = EditableBattlefield.new()
-	_field.name = "EditableBattlefield"
-	# Seed the starting map BEFORE entering the tree, so the base _ready builds this
-	# blank grid directly instead of the 24x24 DemoMap fallback.
-	_field.states = _new_flat_states(NEW_MAP_WIDTH, NEW_MAP_HEIGHT)
-	add_child(_field)   # enters the tree → base _ready builds + renders the seeded grid
+## HOOK: seed the field with a blank New map (its own size/height) instead of the DemoMap fallback.
+## A new map starts every tile at NEW_TILE_HEIGHT (world y well above 0); the base recenters after.
+func _initial_states() -> Array:
+	return _new_flat_states(NEW_MAP_WIDTH, NEW_MAP_HEIGHT)
 
-	# Frame the freshly built grid centered. A new map starts every tile at NEW_TILE_HEIGHT
-	# (world y well above 0), so without this the map floats up out of the camera's y=0 look-at
-	# (the off-center bug). Recentred again on every New / Load / Undo / Resize below.
-	_recenter_camera()
 
-	# Let the designer camera orbit BENEATH the map (battle keeps the default top-down
-	# clamp). Lowering `min_pitch` below 0 is what makes the underside reachable for the
-	# face-aware PAINT tool — you fly under the board to click the BOTTOM face. Set here
-	# (scene-local) rather than on the shared CameraController default, so battles are
-	# unaffected. Stops short of straight-down (-90) where `look_at` would degenerate.
+## HOOK: let the designer camera orbit BENEATH the map (battles keep the top-down clamp), so the
+## face-aware PAINT tool can reach the underside — you fly under the board to click the BOTTOM face.
+## Set here (scene-local) so battles are unaffected; stops short of straight-down (-90) where
+## `look_at` would degenerate.
+func _setup_camera() -> void:
 	_camera.min_pitch = -80.0
 
-	# One theme drives every dialog's font size (built before the dialogs that use it).
-	_ui_theme = Theme.new()
-	_ui_theme.default_font_size = FONT_DIALOG
 
-	_build_hud()
+## HOOK: build the designer's own UI on top of the base HUD panel — the terrain swatch bar and the
+## four dialogs (save/open + new/rename) — then draw the status label.
+func _build_ui() -> void:
 	_build_swatch_bar()
 	_build_dialogs()
 	_build_new_dialog()
@@ -185,15 +167,11 @@ func _ready() -> void:
 	_refresh_label()
 
 
-## Each frame, show the hover feedback for the active tool. While any dialog is open we
-## suppress all hover feedback (the dialog owns input). The RESIZE tool shows the
-## add/delete edge previews instead of the paint cursor; every other tool shows the
-## white tile cursor.
-func _process(_delta: float) -> void:
-	# Suspend the camera's Q/E key-orbit while a dialog is open (its raw-keyboard polling
-	# would otherwise spin the view as you type 'q'/'e' into a name/filename field).
-	var dialog_open := _dialog_open()
-	_camera.key_orbit_enabled = not dialog_open
+## Per-frame hover/drag/resize feedback for the active tool (an AuthoringScene HOOK). `dialog_open`
+## (computed by the base, which also suspends the camera key-orbit) means a picker owns input — clear
+## cursors + bail. The RESIZE tool shows the add/delete edge previews instead of the paint cursor;
+## every other tool shows the white tile cursor.
+func _authoring_process(dialog_open: bool) -> void:
 	if dialog_open:
 		_clear_cursors()
 		return
@@ -695,12 +673,8 @@ func _apply_resize(tile: Vector2i, primary: bool) -> void:
 
 
 ## Point the designer camera at the current grid's center so the whole map frames centered.
-## Called on every STRUCTURAL change (New / Load / Undo / Resize, and the initial build) — NOT
-## on per-tile brush edits, which would make the view jump around while you paint. The center's
-## Y tracks the terrain's height band (see `Battlefield.grid_center_world`), which is what fixes
-## a high-altitude map (new maps start at level 20) rendering above the camera's look-at.
-func _recenter_camera() -> void:
-	_camera.snap_to(_field.grid_center_world())
+# _recenter_camera() (snap the camera to the grid center, called on every STRUCTURAL change — New /
+# Load / Undo / Resize / initial build — but NOT per brush edit) is inherited from AuthoringScene.
 
 
 ## Convert the CURRENT map between Auto and Sculpted depth (the `M` key) — the "switchable later"
@@ -829,31 +803,8 @@ func _on_load_path_chosen(path: String) -> void:
 
 # --- HUD --------------------------------------------------------------------
 
-## Build the on-screen help/status panel on its own CanvasLayer. A dark translucent
-## panel sits behind the text so it stays readable over the light-blue sky / pale tiles.
-func _build_hud() -> void:
-	_hud_layer = CanvasLayer.new()
-	add_child(_hud_layer)
-
-	var panel := PanelContainer.new()
-	panel.position = Vector2(12, 12)
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.0, 0.0, 0.0, 0.6)
-	sb.set_corner_radius_all(4)
-	sb.set_content_margin_all(10)   # padding between the panel edge and the text
-	panel.add_theme_stylebox_override("panel", sb)
-	_hud_layer.add_child(panel)
-
-	_label = Label.new()
-	_label.add_theme_color_override("font_color", Color.WHITE)
-	_label.add_theme_font_size_override("font_size", FONT_HUD)
-	# Cap the panel width and wrap long lines, so the help text grows DOWN the left edge
-	# instead of stretching across toward the swatch bar. Width is in 1080p-base pixels
-	# (the project stretch scales it with the window). The PanelContainer shrink-wraps to
-	# this, so the wrapped label sets both the panel's width and its height.
-	_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_label.custom_minimum_size = Vector2(HUD_PANEL_WIDTH, 0)
-	panel.add_child(_label)
+## The base HUD panel + `_label` are built by AuthoringScene; the swatch bar below is the designer's
+## own addition onto the inherited `_hud_layer`, and `_refresh_label` drives the shared `_label`.
 
 
 ## Build the terrain swatch bar — an ARPG-style skill bar across the top. One colored,
@@ -942,29 +893,13 @@ func _refresh_swatches() -> void:
 		sb.border_color = Color(1.0, 1.0, 1.0, 0.95) if active else Color(0.0, 0.0, 0.0, 0.7)
 
 
-## Create (once) the save and open file pickers, scoped to the maps folder. Both get the
-## shared theme (so the file list / buttons are legible) and a generous min_size — the
-## old `popup_centered_ratio` rendered them uselessly small.
+## Create the save + open file pickers via the base `_make_dialog` factory (which themes them, sizes
+## them, adds them as children, and registers them for `_dialog_open`), scoped to the maps folder.
 func _build_dialogs() -> void:
-	_save_dialog = FileDialog.new()
-	_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
-	_save_dialog.access = FileDialog.ACCESS_RESOURCES
-	_save_dialog.current_dir = MAPS_DIR
-	_save_dialog.add_filter("*.tres", "Map resource")
-	_save_dialog.theme = _ui_theme
-	_save_dialog.min_size = Vector2i(900, 620)
+	_save_dialog = _make_dialog(FileDialog.FILE_MODE_SAVE_FILE, MAPS_DIR, "Map resource")
 	_save_dialog.file_selected.connect(_on_save_path_chosen)
-	add_child(_save_dialog)
-
-	_open_dialog = FileDialog.new()
-	_open_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
-	_open_dialog.access = FileDialog.ACCESS_RESOURCES
-	_open_dialog.current_dir = MAPS_DIR
-	_open_dialog.add_filter("*.tres", "Map resource")
-	_open_dialog.theme = _ui_theme
-	_open_dialog.min_size = Vector2i(900, 620)
+	_open_dialog = _make_dialog(FileDialog.FILE_MODE_OPEN_FILE, MAPS_DIR, "Map resource")
 	_open_dialog.file_selected.connect(_on_load_path_chosen)
-	add_child(_open_dialog)
 
 
 ## Build the New-map dialog: a name field plus width/length spinners. Confirming
@@ -996,6 +931,7 @@ func _build_new_dialog() -> void:
 	vb.add_child(_new_sculpted_check)
 	_new_dialog.confirmed.connect(_on_new_confirmed)
 	add_child(_new_dialog)
+	register_dialog(_new_dialog)   # so the inherited _dialog_open() accounts for it
 
 
 ## Build the Rename dialog: a single name field that rewrites the current map's name
@@ -1016,6 +952,7 @@ func _build_rename_dialog() -> void:
 	_rename_dialog.register_text_enter(_rename_edit)
 	_rename_dialog.confirmed.connect(_on_rename_confirmed)
 	add_child(_rename_dialog)
+	register_dialog(_rename_dialog)   # so the inherited _dialog_open() accounts for it
 
 
 ## A caption above a dialog input. Font size comes from the dialog's shared theme.
@@ -1063,11 +1000,8 @@ func _clean_name(raw: String) -> String:
 	return trimmed if not trimmed.is_empty() else "Untitled"
 
 
-## Whether any modal dialog (new / rename / save / open) is currently shown. Used to
-## suspend hover feedback and hotkeys while a dialog owns input.
-func _dialog_open() -> bool:
-	return _new_dialog.visible or _rename_dialog.visible \
-		or _save_dialog.visible or _open_dialog.visible
+# _dialog_open() is inherited from AuthoringScene — it checks every dialog registered via
+# `_make_dialog` (save/open) or `register_dialog` (new/rename), so all four are accounted for.
 
 
 ## Re-render the status/help text from the current tool + active type + map size.
