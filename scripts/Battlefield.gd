@@ -1092,6 +1092,86 @@ func clear_active_tile() -> void:
 	_active_marker.visible = false
 
 
+# --- Objective (win) tile telegraph ------------------------------------------
+# A gold, glowing, pulsing outline on each reach-to-win objective tile's TOP face, so the player
+# can see where the goal is. Emissive gold so the WorldEnvironment glow blooms it. Built lazily
+# (only battles with objectives pay for it) and pooled/rebuilt each call.
+
+## Gold used for the objective outline (albedo + emission).
+const OBJECTIVE_COLOR := Color(1.0, 0.82, 0.25)
+
+var _objective_root: Node3D               ## parent of the per-tile outline frames
+var _objective_material: StandardMaterial3D  ## shared gold emissive material (pulsed by a tween)
+var _objective_strip_mesh: BoxMesh        ## unit box, scaled per outline edge
+
+
+## Draw a gold glowing outline on each of `tiles` (an Array of Vector2i) — the reach-the-goal
+## telegraph. Rebuilt each call; pass an empty list (or call `clear_objective_tiles`) to remove
+## them. Call again after a map shift to reposition onto the new tile heights.
+func show_objective_tiles(tiles: Array) -> void:
+	_ensure_objective_overlay()
+	for c in _objective_root.get_children():
+		c.free()
+	for t in tiles:
+		_add_objective_frame(t)
+	_objective_root.visible = not tiles.is_empty()
+
+
+## Remove the objective-tile outlines.
+func clear_objective_tiles() -> void:
+	if _objective_root == null:
+		return
+	for c in _objective_root.get_children():
+		c.free()
+	_objective_root.visible = false
+
+
+## Build (once) the objective overlay: its root, the gold emissive material, the strip mesh, and the
+## looping emission pulse that makes the outline "breathe" (and the bloom throb).
+func _ensure_objective_overlay() -> void:
+	if _objective_root != null:
+		return
+	_objective_root = Node3D.new()
+	_objective_root.name = "ObjectiveOverlay"
+	add_child(_objective_root)
+	_objective_strip_mesh = BoxMesh.new()
+	_objective_strip_mesh.size = Vector3.ONE
+	_objective_material = StandardMaterial3D.new()
+	_objective_material.albedo_color = OBJECTIVE_COLOR
+	_objective_material.emission_enabled = true            # glow: pushes HDR past the env's bloom threshold
+	_objective_material.emission = OBJECTIVE_COLOR
+	_objective_material.emission_energy_multiplier = 3.0
+	_objective_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	# Looping pulse on the emission energy, so the outline throbs gently instead of sitting flat.
+	var tween := create_tween().set_loops()
+	tween.tween_property(_objective_material, "emission_energy_multiplier", 5.0, 0.8).set_trans(Tween.TRANS_SINE)
+	tween.tween_property(_objective_material, "emission_energy_multiplier", 2.0, 0.8).set_trans(Tween.TRANS_SINE)
+
+
+## Draw one outline frame (4 edge strips) on tile `t`'s top surface, a hair above the cap.
+func _add_objective_frame(t: Vector2i) -> void:
+	var center := tile_to_world(t.x, t.y)
+	var half := tile_size * 0.5
+	var thick := tile_size * 0.09   # outline thickness
+	var tall := tile_size * 0.06    # slight vertical size so it reads as a raised rim
+	var y := center.y + tall * 0.5 + 0.02
+	# North/South edges run along X; East/West run along Z. Each is a thin scaled box.
+	_add_objective_strip(Vector3(center.x, y, center.z - half), Vector3(tile_size, tall, thick))
+	_add_objective_strip(Vector3(center.x, y, center.z + half), Vector3(tile_size, tall, thick))
+	_add_objective_strip(Vector3(center.x - half, y, center.z), Vector3(thick, tall, tile_size))
+	_add_objective_strip(Vector3(center.x + half, y, center.z), Vector3(thick, tall, tile_size))
+
+
+## One outline strip: the shared unit box scaled to `size` at `pos`, wearing the gold emissive material.
+func _add_objective_strip(pos: Vector3, size: Vector3) -> void:
+	var mi := MeshInstance3D.new()
+	mi.mesh = _objective_strip_mesh
+	mi.material_override = _objective_material
+	mi.scale = size
+	mi.position = pos
+	_objective_root.add_child(mi)
+
+
 ## Ray-pick the tile under a screen point (e.g. the mouse position) using `camera`.
 ## Returns the tile's (x, z) as a `Vector2i`, or `INVALID_TILE` if the ray misses
 ## the grid. Heights are handled for free: the ray hits the actual 3D tile

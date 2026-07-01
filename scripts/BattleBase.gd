@@ -1095,6 +1095,9 @@ func _spawn_from_encounter() -> void:
 		first_map, _battlefield.grid_width, _battlefield.grid_height, seq_len,
 		_encounter.enemies.size(), deploy.size(), _encounter.region(Encounter.REGION_WIN).size()])
 
+	# Telegraph the reach-to-win objective tiles with a gold glowing outline (a no-op if none).
+	_battlefield.show_objective_tiles(_encounter.region(Encounter.REGION_WIN))
+
 
 ## Instantiate one unit from a `Recruit`, stand it on tile (x, z), and register it in
 ## the occupancy map and the turn schedule. Both authored PCs and rolled enemies arrive
@@ -1451,6 +1454,9 @@ func _play_map_transition() -> void:
 	if _battlefield.is_shifting():           # guard the race: a no-op shift finishes synchronously
 		await _battlefield.shift_animation_finished
 	await _resettle_units_after_shift(pre_heights)
+	# The terrain moved — reposition the objective outline onto the new tile heights.
+	if _encounter != null:
+		_battlefield.show_objective_tiles(_encounter.region(Encounter.REGION_WIN))
 	await get_tree().create_timer(MAP_TRANSITION_HOLD).timeout
 
 	# Release the camera so the per-frame follow re-centers on the active unit, and zoom back

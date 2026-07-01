@@ -18,6 +18,7 @@ glow_hdr_threshold = 1.5
 
 [node name="Main" type="Node3D"]
 script = ExtResource("3_main")
+encounter_path = "res://assets/encounters/wall_moat_test.tres"
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_1")
