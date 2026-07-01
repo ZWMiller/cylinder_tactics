@@ -1,0 +1,9 @@
+[gd_resource type="Resource" script_class="MapSequence" format=3]
+
+[ext_resource type="Script" path="res://scripts/maps/MapSequence.gd" id="1_p7sfn"]
+
+[resource]
+script = ExtResource("1_p7sfn")
+maps = PackedStringArray("res://assets/maps/wall_moat_test.tres")
+turns_after = PackedInt32Array(10)
+anchors = PackedInt32Array(0)

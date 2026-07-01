@@ -23,6 +23,14 @@ extends Resource
 ## encounter's map; the loader places the unit here with `Unit.grid_coord = tile`.
 @export var tile: Vector2i = Vector2i.ZERO
 
+## Which FACE of the tile the enemy stands on — a `TileFaces.Face` (TOP / BOTTOM / N / S / E / W).
+## TOP today (units walk on tile tops), but the field exists NOW so face-aware placement — standing
+## on an underside or a wall, the meta-god's flipside / walkable undersides in Phase 5 — needs no
+## format change later. The picker can already report a face
+## (`Battlefield.tile_and_face_at_screen_point`); the builder just pins this to TOP until that
+## gameplay exists, and the loader ignores it for now. See docs/TODO.md Phase 5.
+@export var face: int = TileFaces.Face.TOP
+
 ## The class this enemy rolls as — a `UnitClasses.Class` value stored as its backing int (the
 ## same "class as int" convention `Recruit.starting_class` uses). Fed to `StatRoll.random_recruit`.
 @export var klass: int = 0
